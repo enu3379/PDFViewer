@@ -187,6 +187,54 @@ async function loadSelectedFile(file: File): Promise<void> {
   }
 }
 
+function isFileDrag(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer?.types ?? []).includes('Files');
+}
+
+function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+}
+
+let dropActiveTimer: number | undefined;
+
+function setDropActive(active: boolean): void {
+  document.body.classList.toggle('dragging-pdf', active);
+}
+
+function keepDropActive(): void {
+  setDropActive(true);
+  if (dropActiveTimer !== undefined) window.clearTimeout(dropActiveTimer);
+  dropActiveTimer = window.setTimeout(() => setDropActive(false), 120);
+}
+
+function setupFileDrop(): void {
+  window.addEventListener('dragover', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    keepDropActive();
+  });
+
+  window.addEventListener('dragleave', (event) => {
+    if (!isFileDrag(event)) return;
+    setDropActive(false);
+  });
+
+  window.addEventListener('drop', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    if (dropActiveTimer !== undefined) window.clearTimeout(dropActiveTimer);
+    setDropActive(false);
+
+    const pdf = Array.from(event.dataTransfer?.files ?? []).find(isPdfFile);
+    if (!pdf) {
+      setError(new Error('PDF 파일만 열 수 있습니다.'));
+      return;
+    }
+    void loadSelectedFile(pdf);
+  });
+}
+
 function getDefaultPanelWidth(): number {
   return window.matchMedia('(max-width: 900px)').matches ? PANEL_MIN_WIDTH : 312;
 }
@@ -343,6 +391,7 @@ const host = new PdfHost(
 );
 
 setupPanelResize();
+setupFileDrop();
 
 hubButton.addEventListener('click', () => {
   location.href = runtimeUrl('hub.html');

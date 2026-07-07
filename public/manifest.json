@@ -11,8 +11,7 @@
     "type": "module"
   },
   "permissions": ["storage", "declarativeNetRequest", "activeTab", "contextMenus"],
-  "host_permissions": ["https://arxiv.org/*"],
-  "optional_host_permissions": ["*://*/*"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "web_accessible_resources": [
     {
       "resources": ["viewer.html"],

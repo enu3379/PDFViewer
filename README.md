@@ -41,3 +41,11 @@ npm run test:win
 ```
 
 Load `dist/` as an unpacked extension in `chrome://extensions`.
+
+## Windows Loading Notes
+
+- After changing `public/manifest.json`, run `npm run build:win`, then reload the unpacked `dist/` extension in `chrome://extensions`.
+- Default PDF interception needs the extension's `http://*/*` and `https://*/*` host permissions. Approve the updated permissions when Chrome asks.
+- Local PDFs opened from disk may need "Allow access to file URLs" enabled on the extension details page.
+- If automatic PDF interception is disabled from the extension action context menu, turn "PDF automatically opens in Margin" back on or reload the extension.
+- Dragging a local `.pdf` file onto an empty viewer page loads it directly without using `file:` URL access.

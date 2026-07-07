@@ -53,7 +53,7 @@ jobs:
         run: npm run build
 
       - name: Upload extension build
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: margin-extension-${{ matrix.os }}
           path: dist/

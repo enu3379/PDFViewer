@@ -2,7 +2,7 @@
 
 Chrome MV3 PDF reader extension for the Margin workflow.
 
-The product behavior is defined by the Margin implementation plan and the static demo stored in `docs/margin-demo.html`.
+The product behavior is defined by the Margin implementation plan and the static demo supplied during project setup. The demo should be copied into `docs/margin-demo.html` before detailed UI parity work starts.
 
 ## Milestones
 
@@ -23,4 +23,3 @@ npm test
 ```
 
 Load `dist/` as an unpacked extension in `chrome://extensions`.
-

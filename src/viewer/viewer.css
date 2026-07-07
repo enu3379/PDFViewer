@@ -13,6 +13,7 @@
   --blue: #185FA5;
   --blue-deep: #0C447C;
   --blue-soft: #E6F1FB;
+  --panel-width: 312px;
 }
 
 * {
@@ -34,6 +35,11 @@ body {
   font-family: var(--sans);
   background: var(--bg);
   color: var(--text);
+}
+
+body.resizing-panel {
+  cursor: col-resize;
+  user-select: none;
 }
 
 button,
@@ -237,13 +243,41 @@ input {
 }
 
 #panel {
-  width: 312px;
+  position: relative;
+  width: var(--panel-width);
   flex: none;
   display: flex;
   min-height: 0;
   flex-direction: column;
   background: var(--panel);
   border-left: 1px solid var(--bg);
+}
+
+.panel-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  z-index: 4;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.panel-resize::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  content: "";
+}
+
+.panel-resize:hover::after,
+.panel-resize:focus-visible::after,
+body.resizing-panel .panel-resize::after {
+  background: var(--blue);
 }
 
 .ptabs {
@@ -363,8 +397,8 @@ input {
 }
 
 @media (max-width: 900px) {
-  #panel {
-    width: 264px;
+  :root {
+    --panel-width: 264px;
   }
 
   .file-label {
@@ -378,4 +412,3 @@ input {
     transition: none !important;
   }
 }
-

@@ -3,6 +3,11 @@ import './viewer.css';
 import { type FlatOutlineItem, PdfHost } from './pdf-host';
 
 const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'file:', 'blob:']);
+const PANEL_WIDTH_KEY = 'margin:panelWidth';
+const PANEL_MIN_WIDTH = 264;
+const PANEL_MAX_WIDTH = 560;
+const VIEWER_MIN_WIDTH = 360;
+const PANEL_STEP = 16;
 
 function readFileParam(): string | null {
   const search = location.search.startsWith('?') ? location.search.slice(1) : location.search;
@@ -97,12 +102,14 @@ function setTab(tab: string): void {
 function closePanel(): void {
   panel.hidden = true;
   edge.hidden = false;
+  refreshFitWidthIfNeeded();
 }
 
 function openPanel(tab?: string): void {
   panel.hidden = false;
   edge.hidden = true;
   if (tab) setTab(tab);
+  refreshFitWidthIfNeeded();
 }
 
 function renderToc(items: FlatOutlineItem[]): void {
@@ -180,6 +187,124 @@ async function loadSelectedFile(file: File): Promise<void> {
   }
 }
 
+function getDefaultPanelWidth(): number {
+  return window.matchMedia('(max-width: 900px)').matches ? PANEL_MIN_WIDTH : 312;
+}
+
+function getMaxPanelWidth(): number {
+  return Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, window.innerWidth - VIEWER_MIN_WIDTH));
+}
+
+function clampPanelWidth(width: number): number {
+  return Math.round(Math.min(Math.max(width, PANEL_MIN_WIDTH), getMaxPanelWidth()));
+}
+
+function readStoredPanelWidth(): number | null {
+  try {
+    const raw = localStorage.getItem(PANEL_WIDTH_KEY);
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function storePanelWidth(width: number): void {
+  try {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+  } catch {
+    // Storage can be unavailable in some extension/debug contexts.
+  }
+}
+
+function getCurrentPanelWidth(): number {
+  const rectWidth = panel.getBoundingClientRect().width;
+  return rectWidth > 0 ? rectWidth : getDefaultPanelWidth();
+}
+
+function updateResizeHandleA11y(width: number): void {
+  panelResize.setAttribute('aria-valuemin', String(PANEL_MIN_WIDTH));
+  panelResize.setAttribute('aria-valuemax', String(getMaxPanelWidth()));
+  panelResize.setAttribute('aria-valuenow', String(width));
+}
+
+function setPanelWidth(width: number, persist = false): void {
+  const clamped = clampPanelWidth(width);
+  panel.style.width = `${clamped}px`;
+  updateResizeHandleA11y(clamped);
+  if (persist) storePanelWidth(clamped);
+}
+
+function refreshFitWidthIfNeeded(): void {
+  window.requestAnimationFrame(() => {
+    if (host.viewer.currentScaleValue === 'page-width') {
+      host.fitPageWidth();
+    }
+  });
+}
+
+function setupPanelResize(): void {
+  const storedWidth = readStoredPanelWidth();
+  if (storedWidth !== null) {
+    setPanelWidth(storedWidth);
+  } else {
+    updateResizeHandleA11y(getDefaultPanelWidth());
+  }
+
+  panelResize.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = getCurrentPanelWidth();
+    document.body.classList.add('resizing-panel');
+
+    const onPointerMove = (moveEvent: PointerEvent): void => {
+      setPanelWidth(startWidth + startX - moveEvent.clientX);
+    };
+    const onPointerUp = (): void => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      document.body.classList.remove('resizing-panel');
+      setPanelWidth(getCurrentPanelWidth(), true);
+      refreshFitWidthIfNeeded();
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp, { once: true });
+  });
+
+  panelResize.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setPanelWidth(getCurrentPanelWidth() + PANEL_STEP, true);
+      refreshFitWidthIfNeeded();
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setPanelWidth(getCurrentPanelWidth() - PANEL_STEP, true);
+      refreshFitWidthIfNeeded();
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      setPanelWidth(PANEL_MIN_WIDTH, true);
+      refreshFitWidthIfNeeded();
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      setPanelWidth(getMaxPanelWidth(), true);
+      refreshFitWidthIfNeeded();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    const stored = readStoredPanelWidth();
+    if (stored !== null) {
+      setPanelWidth(stored);
+      refreshFitWidthIfNeeded();
+    } else {
+      updateResizeHandleA11y(getDefaultPanelWidth());
+    }
+  });
+}
+
 const emptyState = requireElement<HTMLElement>('#emptyState');
 const pendingState = requireElement<HTMLElement>('#pendingState');
 const errorState = requireElement<HTMLElement>('#errorState');
@@ -200,6 +325,7 @@ const zoomIn = requireElement<HTMLButtonElement>('#zoomIn');
 const fitWidth = requireElement<HTMLButtonElement>('#fitWidth');
 const zoomLabel = requireElement<HTMLElement>('#zoomLabel');
 const panel = requireElement<HTMLElement>('#panel');
+const panelResize = requireElement<HTMLElement>('#panelResize');
 const edge = requireElement<HTMLButtonElement>('#edge');
 const closePanelButton = requireElement<HTMLButtonElement>('#closePanel');
 const pinPanel = requireElement<HTMLButtonElement>('#pinPanel');
@@ -215,6 +341,8 @@ const host = new PdfHost(
     onScaleChange: setScaleUi
   }
 );
+
+setupPanelResize();
 
 hubButton.addEventListener('click', () => {
   location.href = runtimeUrl('hub.html');

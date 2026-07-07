@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Margin",
+  "version": "0.1.0",
+  "minimum_chrome_version": "121",
+  "action": {
+    "default_title": "Margin으로 열기"
+  },
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "declarativeNetRequest", "activeTab", "contextMenus"],
+  "host_permissions": ["https://arxiv.org/*"],
+  "optional_host_permissions": ["*://*/*"],
+  "web_accessible_resources": [
+    {
+      "resources": ["viewer.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
+

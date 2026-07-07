@@ -1,0 +1,136 @@
+:root {
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  --bg: #dcd9d1;
+  --panel: #fbfaf6;
+  --paper: #fff;
+  --text: #2c2c2a;
+  --muted: #8a887f;
+  --line: #d8d5cc;
+  --blue: #185FA5;
+  --blue-soft: #E6F1FB;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.app-shell {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: #f7f5f0;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0C447C;
+}
+
+.file-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.toolbar-button,
+.file-button {
+  border: 1px solid #d5d2c8;
+  background: #fff;
+  border-radius: 7px;
+  color: #3a3a37;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.toolbar-button:hover,
+.file-button:hover {
+  background: #f2f0ea;
+}
+
+.reader {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: #e4e1da;
+}
+
+.empty-state {
+  width: min(520px, 100%);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .07);
+  padding: 28px;
+}
+
+.empty-state h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.empty-state p {
+  margin: 0 0 14px;
+  color: #5f5e5a;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.file-button {
+  display: inline-flex;
+}
+
+.file-button input {
+  display: none;
+}
+
+.hint {
+  margin-top: 12px !important;
+  color: #9a988f !important;
+  font-size: 11.5px !important;
+}
+

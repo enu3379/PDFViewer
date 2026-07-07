@@ -11,6 +11,8 @@ import {
   PDFViewer
 } from 'pdfjs-dist/web/pdf_viewer.mjs';
 import type { PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api';
+import type { PageViewport } from 'pdfjs-dist/types/src/display/display_utils';
+import type { DocId, DocMeta } from '../core/types';
 
 GlobalWorkerOptions.workerSrc = workerSrc;
 
@@ -123,6 +125,34 @@ export class PdfHost {
     } catch {
       return fallback;
     }
+  }
+
+  async getDocMeta(titleFallback: string, url?: string): Promise<DocMeta> {
+    if (!this.#doc) throw new Error('PDF document is not loaded.');
+    const now = Date.now();
+    return {
+      id: this.docId,
+      title: await this.getTitle(titleFallback),
+      url,
+      pageCount: this.#doc.numPages,
+      pdfjsVersion,
+      addedAt: now,
+      lastOpenedAt: now
+    };
+  }
+
+  get docId(): DocId {
+    const fingerprint = this.#doc?.fingerprints[0];
+    if (!fingerprint) throw new Error('PDF fingerprint is unavailable.');
+    return fingerprint;
+  }
+
+  getPageDiv(pageNumber: number): HTMLElement | null {
+    return (this.viewer.getPageView(pageNumber - 1)?.div as HTMLElement | undefined) ?? null;
+  }
+
+  getPageViewport(pageNumber: number): PageViewport | null {
+    return (this.viewer.getPageView(pageNumber - 1)?.viewport as PageViewport | undefined) ?? null;
   }
 
   previousPage(): void {

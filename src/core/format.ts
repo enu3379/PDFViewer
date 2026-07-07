@@ -34,3 +34,7 @@ export function renderRichText(text: string): string {
     .replace(/(^|\s)#([\p{L}\p{N}_·-]+)/gu, '$1<span class="tg">#$2</span>');
 }
 
+export function formatShortDate(timestamp: number): string {
+  const date = new Date(timestamp);
+  return `${date.getMonth() + 1}월 ${date.getDate()}일`;
+}

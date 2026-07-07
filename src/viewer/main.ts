@@ -1,5 +1,12 @@
 import 'pdfjs-dist/web/pdf_viewer.css';
 import './viewer.css';
+import { createAnchorFromRange, repairAnchor } from '../core/anchor';
+import { parseLinks, parseTags } from '../core/format';
+import { makeId, MarginStore, type DocData } from '../core/store';
+import { buildPageTextIndex, type PageTextIndex } from '../core/text-index';
+import type { Highlight, Memo, PenColor } from '../core/types';
+import { HighlightOverlay } from './overlay-highlights';
+import { MemoTab } from './panel/tab-memos';
 import { type FlatOutlineItem, PdfHost } from './pdf-host';
 
 const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'file:', 'blob:']);
@@ -76,6 +83,13 @@ function setError(error: unknown): void {
   showOnly(errorState);
 }
 
+function flashElement(el: HTMLElement): void {
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+  window.setTimeout(() => el.classList.remove('flash'), 1500);
+}
+
 function setPageUi(page: number, pageCount: number): void {
   pageNumberInput.value = String(page || 1);
   pageCountLabel.textContent = String(pageCount || 0);
@@ -127,6 +141,31 @@ function renderToc(items: FlatOutlineItem[]): void {
   markTocForPage(host.currentPage);
 }
 
+function syncAnnotationViews(): void {
+  if (!docData) return;
+  overlay.setData(docData.highlights, docData.memos, lostHighlights);
+  overlay.renderAll();
+  memoTab.setData(docData.highlights, docData.memos, lostHighlights, currentPen);
+}
+
+function scheduleDocSave(): void {
+  if (docData) store.scheduleSaveDoc(docData);
+}
+
+function flushDocSave(): void {
+  if (docData) void store.flushDoc(docData);
+}
+
+async function initializeDoc(titleFallback: string, url?: string): Promise<void> {
+  const meta = await host.getDocMeta(titleFallback, url);
+  docData = await store.loadDoc(meta);
+  pageIndexes.clear();
+  lostHighlights.clear();
+  buildRenderedPageIndexes();
+  syncAnnotationViews();
+  repairRenderedPages();
+}
+
 function markTocForPage(page: number): void {
   if (!outlineItems.length) return;
   let active: FlatOutlineItem | null = null;
@@ -162,8 +201,8 @@ async function loadUrl(file: string): Promise<void> {
   if (fileLabel) fileLabel.textContent = basenameFromUrl(file);
   try {
     await host.loadUrl(file);
-    const title = await host.getTitle(basenameFromUrl(file));
-    if (fileLabel) fileLabel.textContent = title;
+    await initializeDoc(basenameFromUrl(file), file);
+    if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     showOnly(readRow);
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
@@ -177,14 +216,211 @@ async function loadSelectedFile(file: File): Promise<void> {
   if (fileLabel) fileLabel.textContent = file.name;
   try {
     await host.loadFile(file);
-    const title = await host.getTitle(file.name);
-    if (fileLabel) fileLabel.textContent = title;
+    await initializeDoc(file.name);
+    if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     showOnly(readRow);
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
     setError(error);
   }
+}
+
+function pageNumberFromDiv(pageDiv: HTMLElement): number | null {
+  const raw = pageDiv.dataset.pageNumber ?? pageDiv.id.match(/\d+/)?.[0];
+  const page = raw ? Number(raw) : NaN;
+  return Number.isInteger(page) && page > 0 ? page : null;
+}
+
+function closestPageDiv(node: Node): HTMLElement | null {
+  const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node instanceof HTMLElement ? node : null;
+  return element?.closest<HTMLElement>('.page') ?? null;
+}
+
+function getOrBuildPageIndex(pageNumber: number): PageTextIndex | null {
+  const existing = pageIndexes.get(pageNumber);
+  if (existing) return existing;
+  const pageDiv = host.getPageDiv(pageNumber);
+  if (!pageDiv) return null;
+  const index = buildPageTextIndex(pageNumber, pageDiv);
+  if (!index.text) return null;
+  pageIndexes.set(pageNumber, index);
+  return index;
+}
+
+function buildRenderedPageIndexes(): void {
+  for (let pageNumber = 1; pageNumber <= host.pageCount; pageNumber += 1) {
+    const pageDiv = host.getPageDiv(pageNumber);
+    if (!pageDiv?.querySelector('.textLayer span')) continue;
+    const index = buildPageTextIndex(pageNumber, pageDiv);
+    if (index.text) pageIndexes.set(pageNumber, index);
+  }
+}
+
+function handleTextLayerRendered(pageNumber: number): void {
+  const pageDiv = host.getPageDiv(pageNumber);
+  if (!pageDiv) return;
+  const index = buildPageTextIndex(pageNumber, pageDiv);
+  pageIndexes.set(pageNumber, index);
+  repairPageAnchors(pageNumber);
+  syncAnnotationViews();
+}
+
+function repairRenderedPages(): void {
+  for (const pageNumber of pageIndexes.keys()) {
+    repairPageAnchors(pageNumber);
+  }
+  syncAnnotationViews();
+}
+
+function repairPageAnchors(pageNumber: number): void {
+  if (!docData) return;
+  const index = pageIndexes.get(pageNumber);
+  const pageDiv = host.getPageDiv(pageNumber);
+  const viewport = host.getPageViewport(pageNumber);
+  if (!index || !pageDiv || !viewport) return;
+
+  let changed = false;
+  for (const highlight of docData.highlights.filter((item) => item.anchor.page === pageNumber)) {
+    const repaired = repairAnchor(highlight.anchor, index, pageDiv, viewport);
+    if (!repaired) {
+      lostHighlights.add(highlight.id);
+      continue;
+    }
+    lostHighlights.delete(highlight.id);
+    if (
+      repaired.start !== highlight.anchor.start ||
+      repaired.end !== highlight.anchor.end ||
+      repaired.quads.length !== highlight.anchor.quads.length
+    ) {
+      highlight.anchor = repaired;
+      changed = true;
+    }
+  }
+  if (changed) scheduleDocSave();
+}
+
+function handleSelection(): void {
+  if (!docData) return;
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+  const range = selection.getRangeAt(0);
+  if (!viewerContainer.contains(range.startContainer)) return;
+
+  const pageDiv = closestPageDiv(range.startContainer);
+  const pageNumber = pageDiv ? pageNumberFromDiv(pageDiv) : null;
+  if (!pageDiv || !pageNumber) return;
+
+  const index = getOrBuildPageIndex(pageNumber);
+  const viewport = host.getPageViewport(pageNumber);
+  if (!index || !viewport) return;
+
+  const anchor = createAnchorFromRange(range, index, pageDiv, viewport);
+  selection.removeAllRanges();
+  if (!anchor) return;
+
+  const highlight: Highlight = {
+    id: makeId('h'),
+    doc: docData.meta.id,
+    color: currentPen,
+    anchor,
+    createdAt: Date.now()
+  };
+  docData.highlights.push(highlight);
+  scheduleDocSave();
+  syncAnnotationViews();
+
+  if (!panel.hidden) {
+    openPanel('memos');
+    memoTab.openComposeForHighlight(highlight.id);
+  }
+}
+
+function memoForHighlight(highlightId: string): Memo | undefined {
+  return docData?.memos.find((memo) => memo.anchorType === 'highlight' && memo.anchorId === highlightId);
+}
+
+function saveHighlightMemo(highlightId: string, text: string): void {
+  if (!docData) return;
+  const highlight = docData.highlights.find((candidate) => candidate.id === highlightId);
+  if (!highlight) return;
+
+  const now = Date.now();
+  const existing = memoForHighlight(highlightId);
+  if (existing) {
+    existing.text = text;
+    existing.tags = parseTags(text);
+    existing.links = parseLinks(text);
+    existing.updatedAt = now;
+  } else {
+    const memo: Memo = {
+      id: makeId('m'),
+      doc: docData.meta.id,
+      anchorType: 'highlight',
+      anchorId: highlight.id,
+      quote: highlight.anchor.quote,
+      page: highlight.anchor.page,
+      text,
+      tags: parseTags(text),
+      links: parseLinks(text),
+      createdAt: now,
+      updatedAt: now
+    };
+    docData.memos.push(memo);
+    highlight.memoId = memo.id;
+  }
+  scheduleDocSave();
+  syncAnnotationViews();
+}
+
+function deleteHighlight(highlightId: string): void {
+  if (!docData) return;
+  docData.highlights = docData.highlights.filter((highlight) => highlight.id !== highlightId);
+  docData.memos = docData.memos.filter(
+    (memo) => !(memo.anchorType === 'highlight' && memo.anchorId === highlightId)
+  );
+  lostHighlights.delete(highlightId);
+  scheduleDocSave();
+  syncAnnotationViews();
+}
+
+function deleteMemo(memoId: string): void {
+  if (!docData) return;
+  const memo = docData.memos.find((candidate) => candidate.id === memoId);
+  if (memo?.anchorType === 'highlight') {
+    deleteHighlight(memo.anchorId);
+    return;
+  }
+  docData.memos = docData.memos.filter((candidate) => candidate.id !== memoId);
+  scheduleDocSave();
+  syncAnnotationViews();
+}
+
+function handleHighlightClick(highlightId: string): void {
+  if (!docData) return;
+  const highlight = docData.highlights.find((candidate) => candidate.id === highlightId);
+  if (!highlight) return;
+  openPanel('memos');
+
+  const memo = highlight.memoId ? docData.memos.find((candidate) => candidate.id === highlight.memoId) : undefined;
+  if (memo) {
+    memoTab.closeCompose();
+    window.requestAnimationFrame(() => memoTab.focusMemo(memo.id));
+  } else {
+    memoTab.openComposeForHighlight(highlightId);
+  }
+}
+
+function jumpToHighlight(highlightId: string): void {
+  if (!docData) return;
+  const highlight = docData.highlights.find((candidate) => candidate.id === highlightId);
+  if (!highlight) return;
+  host.viewer.scrollPageIntoView({ pageNumber: highlight.anchor.page });
+  window.setTimeout(() => {
+    const el = overlay.getFirstElement(highlightId);
+    if (el) flashElement(el);
+  }, 100);
+  if (!pinned) closePanel();
 }
 
 function isFileDrag(event: DragEvent): boolean {
@@ -378,9 +614,20 @@ const edge = requireElement<HTMLButtonElement>('#edge');
 const closePanelButton = requireElement<HTMLButtonElement>('#closePanel');
 const pinPanel = requireElement<HTMLButtonElement>('#pinPanel');
 const tocList = requireElement<HTMLElement>('#tocList');
+const composeSlot = requireElement<HTMLElement>('#composeSlot');
+const pensRow = requireElement<HTMLElement>('#pensRow');
+const memoSearch = requireElement<HTMLInputElement>('#memoSearch');
+const memoCount = requireElement<HTMLElement>('#memoCount');
+const memoTabN = requireElement<HTMLElement>('#memoTabN');
+const memoList = requireElement<HTMLElement>('#memoList');
 
 let outlineItems: FlatOutlineItem[] = [];
 let pinned = true;
+let currentPen: PenColor = 'amber';
+let docData: DocData | null = null;
+const store = new MarginStore();
+const pageIndexes = new Map<number, PageTextIndex>();
+const lostHighlights = new Set<string>();
 
 const host = new PdfHost(
   { container: viewerContainer, viewer: viewerElement },
@@ -390,8 +637,54 @@ const host = new PdfHost(
   }
 );
 
+const overlay = new HighlightOverlay(
+  {
+    getPageDiv: (pageNumber) => host.getPageDiv(pageNumber),
+    getPageViewport: (pageNumber) => host.getPageViewport(pageNumber)
+  },
+  {
+    onHighlightClick: handleHighlightClick
+  }
+);
+
+const memoTab = new MemoTab(
+  {
+    composeSlot,
+    pensRow,
+    memoSearch,
+    memoCount,
+    memoTabN,
+    memoList
+  },
+  {
+    onPenChange: (color) => {
+      currentPen = color;
+      const composing = memoTab.composingHighlightId;
+      const highlight = docData?.highlights.find((candidate) => candidate.id === composing);
+      if (highlight) {
+        highlight.color = color;
+        scheduleDocSave();
+      }
+      syncAnnotationViews();
+    },
+    onSaveHighlightMemo: saveHighlightMemo,
+    onDeleteHighlight: deleteHighlight,
+    onDeleteMemo: deleteMemo,
+    onJumpHighlight: jumpToHighlight
+  }
+);
+
 setupPanelResize();
 setupFileDrop();
+syncAnnotationViews();
+
+host.eventBus.on('textlayerrendered', (event: { pageNumber: number }) => {
+  handleTextLayerRendered(event.pageNumber);
+});
+
+host.eventBus.on('pagerendered', (event: { pageNumber: number }) => {
+  overlay.renderPage(event.pageNumber);
+});
 
 hubButton.addEventListener('click', () => {
   location.href = runtimeUrl('hub.html');
@@ -400,6 +693,10 @@ hubButton.addEventListener('click', () => {
 fileInput.addEventListener('change', () => {
   const [file] = Array.from(fileInput.files ?? []);
   if (file) void loadSelectedFile(file);
+});
+
+viewerContainer.addEventListener('mouseup', () => {
+  window.setTimeout(handleSelection, 0);
 });
 
 prevPage.addEventListener('click', () => host.previousPage());
@@ -422,6 +719,17 @@ pinPanel.addEventListener('click', () => {
   pinned = !pinned;
   pinPanel.classList.toggle('on', pinned);
   pinPanel.title = pinned ? '고정됨 — 클릭해 해제' : '고정 해제 — 패널에서 이동하면 자동으로 닫힘';
+});
+
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    memoTab.closeCompose();
+  }
+});
+
+window.addEventListener('pagehide', flushDocSave);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushDocSave();
 });
 
 tocList.addEventListener('click', (event) => {

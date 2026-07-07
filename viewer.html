@@ -68,7 +68,18 @@
                 <div class="empty">그림·표 가져오기 기능은 별도 모듈로 연결할 예정입니다.</div>
               </section>
               <section class="tab-page" data-tab="memos" hidden>
-                <div class="empty">메모와 하이라이트는 M2에서 구현합니다.</div>
+                <div id="composeSlot"></div>
+                <div class="pens" id="pensRow">
+                  <span class="penlab">형광펜</span>
+                  <button class="pen on" data-color="amber" type="button" aria-label="주황 형광펜"></button>
+                  <button class="pen" data-color="teal" type="button" aria-label="초록 형광펜"></button>
+                  <button class="pen" data-color="pink" type="button" aria-label="분홍 형광펜"></button>
+                  <button class="pen" data-color="blue" type="button" aria-label="파랑 형광펜"></button>
+                </div>
+                <p class="memohint">본문을 드래그하면 형광펜이 칠해집니다. 패널이 열려 있으면 바로 메모 작성, 닫혀 있으면 조용히 저장되고 여백에 점만 남아요.</p>
+                <input class="search" id="memoSearch" placeholder="메모·인용문 검색">
+                <div class="subh">이 문서의 메모 <span id="memoCount"></span></div>
+                <div id="memoList"></div>
               </section>
             </div>
           </aside>

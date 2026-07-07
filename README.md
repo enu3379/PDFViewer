@@ -6,7 +6,7 @@ For implementation work, [docs/implementation-plan.md](docs/implementation-plan.
 
 ## Current Status
 
-M0 is complete. M1 is in progress.
+M0 and M1 are complete. M2 highlight and memo storage work is in progress.
 
 ## Spec
 

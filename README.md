@@ -2,7 +2,16 @@
 
 Chrome MV3 PDF reader extension for the Margin workflow.
 
-The product behavior is defined by the Margin implementation plan and the static demo supplied during project setup. The demo should be copied into `docs/margin-demo.html` before detailed UI parity work starts.
+For implementation work, [docs/implementation-plan.md](docs/implementation-plan.md) is the source of truth. The static UI reference is [docs/margin-demo.html](docs/margin-demo.html).
+
+## Current Status
+
+M0 is complete. M1 is in progress.
+
+## Spec
+
+- [Implementation Plan](docs/implementation-plan.md)
+- [UI Demo](docs/margin-demo.html)
 
 ## Milestones
 

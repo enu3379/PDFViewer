@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Margin — PDF 리더 데모</title>
+<style>
+:root{--sans:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR','Malgun Gothic',sans-serif;--serif:Georgia,'Times New Roman',serif;}
+*{box-sizing:border-box;}
+[hidden]{display:none !important;}
+html,body{height:100%;}
+body{margin:0;font-family:var(--sans);background:#dcd9d1;color:#2c2c2a;display:flex;flex-direction:column;overflow:hidden;}
+button{font-family:inherit;}
+:focus-visible{outline:2px solid #185FA5;outline-offset:1px;}
+
+.tabstrip{display:flex;align-items:flex-end;gap:4px;padding:8px 10px 0;background:#dcd9d1;flex:none;}
+.btab{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:12px;color:#5f5e5a;background:#e7e4dd;border-radius:9px 9px 0 0;cursor:pointer;max-width:260px;min-width:0;}
+.btab.on{background:#f7f5f0;color:#2c2c2a;}
+.btitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
+.fvc{width:9px;height:9px;border-radius:3px;flex:none;}
+.tx{color:#a09e95;font-size:11px;flex:none;}
+.newtab{padding:4px 10px 8px;color:#7c7a72;font-size:15px;}
+.urlbar{display:flex;align-items:center;gap:10px;padding:7px 12px;background:#f7f5f0;border-bottom:1px solid #d8d5cc;flex:none;}
+.navic{color:#8a887f;font-size:14px;padding:0 2px;}
+.urlfield{flex:1;display:flex;align-items:center;gap:7px;background:#eceae3;border-radius:8px;padding:6px 12px;font-size:12px;color:#5f5e5a;min-width:0;}
+.urlfield svg{flex:none;color:#8a887f;}
+.extbtn{width:24px;height:24px;border:0;border-radius:7px;background:#E6F1FB;color:#0C447C;font-weight:700;font-size:12px;cursor:pointer;flex:none;}
+
+.view{flex:1;min-height:0;display:flex;flex-direction:column;}
+.rtoolbar{height:30px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:12px;color:#8a887f;background:#f0eee8;border-bottom:1px solid #e0ddd4;flex:none;}
+.readrow{flex:1;min-height:0;display:flex;}
+#pdfscroll{flex:1;min-width:0;overflow-y:auto;background:#e4e1da;padding:26px 0 80px;}
+
+.page{position:relative;width:min(760px,94%);margin:0 auto 26px;background:#fff;border:1px solid #d8d5cc;box-shadow:0 1px 3px rgba(0,0,0,.07);padding:54px 62px 64px;min-height:1000px;font-family:var(--serif);color:#222;font-size:14.5px;line-height:1.75;}
+.page ::selection{background:#bcd7f0;}
+.page p{margin:0 0 13px;text-align:justify;}
+.ptitle{font-size:21px;line-height:1.4;text-align:center;margin:0 0 12px;font-weight:700;}
+.pauthors{text-align:center !important;font-size:13px;color:#555;margin-bottom:30px !important;}
+.abshead{text-align:center !important;font-size:12.5px;letter-spacing:.18em;color:#444;margin:0 0 8px !important;font-weight:700;}
+.absbody{font-size:13.5px;}
+.sech{font-size:15.5px;font-weight:700;margin:28px 0 11px;}
+.refs{font-size:12.5px;color:#3a3a37;}
+.pageno{position:absolute;bottom:24px;left:0;right:0;text-align:center;font-size:12px;color:#8a887f;}
+a.figref{color:#185FA5;text-decoration:none;border-bottom:1px dotted #185FA5;cursor:pointer;}
+a.figref.on{background:#E6F1FB;border-radius:3px;padding:0 2px;}
+figure.docfig{margin:24px 0;}
+.figbody{width:100%;}
+.doctab{width:100%;border-collapse:collapse;font-size:12.5px;}
+.doctab th,.doctab td{border:1px solid #b9b7ae;padding:6px 9px;text-align:left;vertical-align:top;}
+.doctab th{background:#f3f2ee;font-weight:700;}
+figcaption{font-size:12.5px;color:#444;margin-top:9px;line-height:1.55;}
+mark.hl{padding:0 1px;border-radius:2px;cursor:pointer;color:inherit;}
+.c-amber{background:#FAD57E;}
+.c-teal{background:#B7E8D4;}
+.c-pink{background:#F6CBD9;}
+.c-blue{background:#C3DCF6;}
+.mdot{position:absolute;right:14px;width:9px;height:9px;border-radius:50%;cursor:pointer;z-index:2;}
+.mdot.solid{background:var(--c);border:2px solid var(--c);}
+.mdot.hollow{background:#fff;border:2px solid var(--c);}
+.flash{animation:mflash 1.4s ease;}
+@keyframes mflash{0%{box-shadow:0 0 0 4px rgba(24,95,165,.35);background-color:rgba(230,241,251,.9);}70%{box-shadow:0 0 0 4px rgba(24,95,165,.15);}100%{box-shadow:0 0 0 0 rgba(24,95,165,0);background-color:transparent;}}
+
+#panel{width:312px;flex:none;background:#fbfaf6;border-left:1px solid #dcd9d1;display:flex;flex-direction:column;min-height:0;}
+.ptabs{display:flex;align-items:center;gap:2px;padding:9px 10px 0;border-bottom:1px solid #e4e1d8;flex:none;}
+.ptab{font-size:12.5px;color:#8a887f;padding:3px 9px 8px;cursor:pointer;border:0;background:none;border-bottom:2px solid transparent;}
+.ptab.on{color:#0C447C;border-bottom-color:#185FA5;font-weight:600;}
+.pico{cursor:pointer;color:#a09e95;background:none;border:0;padding:2px 4px 8px;font-size:13px;line-height:1;}
+.pico.on{color:#185FA5;}
+.pbody{flex:1;min-height:0;overflow-y:auto;padding:12px;}
+.subh{font-size:11px;color:#8a887f;margin:15px 0 7px;}
+.btn{font-size:12px;padding:5px 10px;border:1px solid #d5d2c8;background:#fff;border-radius:7px;cursor:pointer;color:#3a3a37;}
+.btn:hover{background:#f2f0ea;}
+.btn.pri{background:#1d1d1f;color:#fff;border-color:#1d1d1f;}
+.btn.pri:hover{background:#3a3a37;}
+.btn.sm{font-size:11.5px;padding:3px 9px;}
+.btnrow{display:flex;gap:7px;margin:11px 0 2px;}
+.sp{flex:1;}
+.lnkbtn{cursor:pointer;color:#8a887f;font-size:11.5px;}
+.lnkbtn:hover{color:#185FA5;text-decoration:underline;}
+.empty{font-size:12px;color:#9a988f;padding:8px 2px;line-height:1.6;}
+.chipmini{font-size:11px;color:#8a887f;border:1px solid #ddd9cf;border-radius:9px;padding:0 7px;white-space:nowrap;}
+.dt{font-size:11px;color:#b0aea4;}
+
+.tocrow{font-size:12.5px;padding:7px 9px;border-radius:7px;color:#3a3a37;cursor:pointer;}
+.tocrow:hover{background:#f2f0e9;}
+.tocrow.on{background:#E6F1FB;color:#0C447C;}
+
+.figlabelrow{display:flex;align-items:center;gap:7px;margin:0 0 8px;}
+.figlabel{font-size:13px;font-weight:600;color:#2c2c2a;}
+.prevcard{background:#fff;border:1px solid #dfdcd3;border-radius:8px;padding:10px;}
+.prevcard svg{width:100%;height:auto;display:block;}
+.prevcard .doctab{font-size:10.5px;}
+.prevcard .doctab th,.prevcard .doctab td{padding:4px 6px;}
+.pcap{font-size:11.5px;color:#77756d;line-height:1.55;margin:8px 0 0;}
+.mrow{padding:7px 9px;border:1px solid #e6e3da;border-radius:8px;margin-bottom:6px;cursor:pointer;background:#fff;}
+.mrow:hover{border-color:#b9d4ec;}
+.msnip{font-size:11.5px;color:#4a4945;font-family:var(--serif);line-height:1.55;}
+.snb{color:#0C447C;font-weight:700;}
+.mmeta{font-size:11px;color:#9a988f;margin-top:4px;}
+.frow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;font-size:12.5px;color:#3a3a37;}
+.frow:hover{background:#f2f0e9;}
+.frow.on{background:#E6F1FB;color:#0C447C;font-weight:600;}
+.fthumb{width:22px;height:16px;border:1px solid #cfccc2;background:#fff;flex:none;}
+.fpg{margin-left:auto;font-size:11px;color:#9a988f;}
+.frow.on .fpg{color:#3a76ad;}
+
+.pens{display:flex;align-items:center;gap:9px;margin:0 0 10px;}
+.penlab{font-size:11px;color:#8a887f;}
+.pen{width:15px;height:15px;border-radius:50%;cursor:pointer;border:2px solid transparent;padding:0;}
+.pen.on{border-color:#2c2c2a;}
+.memohint{font-size:11px;color:#9a988f;line-height:1.6;margin:0 0 11px;}
+.search{width:100%;font-size:12px;font-family:var(--sans);padding:7px 10px;border:1px solid #ddd9cf;border-radius:7px;background:#fff;margin:0 0 4px;color:#2c2c2a;}
+.compose{border:1px solid #cfd9e4;background:#fff;border-radius:9px;padding:10px;margin:0 0 13px;}
+.cquote{border-left:3px solid var(--c,#8a887f);padding:4px 10px;background:#f6f4ee;font-family:var(--serif);font-size:12px;color:#4a4945;line-height:1.6;}
+.cqmeta{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:11px;color:#9a988f;font-family:var(--sans);}
+.cta{width:100%;font-family:var(--sans);font-size:12.5px;line-height:1.6;padding:7px 9px;border:1px solid #ddd9cf;border-radius:7px;margin-top:8px;min-height:64px;resize:vertical;color:#2c2c2a;}
+.chint{font-size:11px;color:#b0aea4;margin-top:4px;}
+.crow{display:flex;align-items:center;gap:10px;margin-top:9px;}
+.mcard{background:#fff;border:1px solid #e6e3da;border-radius:9px;padding:9px 11px;margin-bottom:8px;cursor:pointer;}
+.mcard:hover{border-color:#cfd9e4;}
+.mq{font-family:var(--serif);font-size:11.5px;color:#8a887f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mtxt{font-size:12.5px;line-height:1.6;color:#2c2c2a;margin-top:4px;word-break:break-word;}
+.wl{color:#185FA5;}
+.tg{color:#0C447C;background:#E6F1FB;border-radius:9px;padding:0 7px;font-size:11.5px;}
+.mfoot{display:flex;align-items:center;gap:8px;margin-top:7px;}
+.ring{outline:2px solid #185FA5;outline-offset:1px;}
+
+#edge{width:26px;flex:none;background:#f0eee8;border-left:1px solid #dcd9d1;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#8a887f;font-size:15px;}
+#edge:hover{background:#e9e6df;color:#185FA5;}
+
+#hub{flex:1;min-height:0;overflow-y:auto;background:#f2f0ea;}
+.hubwrap{max-width:860px;margin:28px auto 80px;padding:0 22px;}
+.hubhead{display:flex;align-items:center;gap:10px;}
+.hubhead h1{font-size:20px;margin:0;font-weight:700;}
+#hubCount{font-size:13px;color:#9a988f;}
+#hubSearch{width:230px;font-size:12px;font-family:var(--sans);padding:7px 11px;border:1px solid #ddd9cf;border-radius:8px;background:#fff;color:#2c2c2a;}
+.chiprow{display:flex;gap:7px;flex-wrap:wrap;margin:14px 0 8px;}
+.chip{font-size:11.5px;padding:4px 11px;border:1px solid #d9d5ca;border-radius:999px;background:#fff;color:#5f5e5a;cursor:pointer;}
+.chip.on{background:#E6F1FB;color:#0C447C;border-color:#b9d4ec;}
+.ghead{display:flex;align-items:center;gap:10px;margin:24px 0 10px;flex-wrap:wrap;}
+.gtitle{font-size:14px;font-weight:600;color:#2c2c2a;}
+.gmeta{font-size:11.5px;color:#9a988f;}
+.hcard{background:#fff;border:1px solid #e4e1d8;border-radius:11px;padding:11px 15px;margin-bottom:9px;cursor:pointer;}
+.hcard:hover{border-color:#cfd9e4;}
+.hcard.open{border-color:#b9d4ec;}
+.hx{border-top:1px solid #eceae2;margin-top:10px;padding-top:10px;cursor:default;}
+.hlinks{font-size:12px;color:#5f5e5a;margin-bottom:2px;}
+.hbtns{display:flex;gap:8px;margin-top:9px;}
+.bref{display:flex;align-items:center;gap:10px;padding:4px 0;font-size:12px;}
+.brefq{font-family:var(--serif);color:#77756d;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bk{font-size:11.5px;color:#9a988f;}
+.hint{font-size:11px;color:#b0aea4;}
+
+@media (max-width:900px){#panel{width:264px;}.page{padding:40px 34px 56px;}}
+@media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important;}}
+</style>
+</head>
+<body>
+
+<div class="tabstrip">
+  <div class="btab on" id="tabReader" role="button" tabindex="0"><span class="fvc" style="background:#b2442e"></span><span class="btitle">Human oversight in AI-assisted empirical research — arXiv</span><span class="tx">✕</span></div>
+  <div class="btab" id="tabHub" role="button" tabindex="0"><span class="fvc" style="background:#185FA5"></span><span class="btitle">Margin — 메모 허브</span><span class="tx">✕</span></div>
+  <div class="newtab">+</div>
+</div>
+<div class="urlbar">
+  <span class="navic">‹</span><span class="navic">›</span><span class="navic">⟳</span>
+  <div class="urlfield"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span id="urlText">arxiv.org/pdf/2606.12848</span></div>
+  <button class="extbtn" id="extBtn" title="Margin 메모 허브 열기">M</button>
+</div>
+
+<div class="view" id="viewReader">
+  <div class="rtoolbar"><span id="pageInd">1 / 3</span><span>·</span><span>100%</span></div>
+  <div class="readrow">
+    <div id="pdfscroll">
+      <div id="pages">
+        <section class="page" data-page="1">
+          <h1 class="ptitle">Human oversight in AI-assisted empirical research</h1>
+          <p class="pauthors">M. Aoki · S. Park · D. Ferreira — Institute for Research Integrity</p>
+          <p class="abshead" id="sec-abs">Abstract</p>
+          <p class="absbody" id="p-abs">Large language models can now draft full empirical studies, yet their outputs vary widely in rigor. We propose a lightweight oversight protocol in which every AI-generated analysis is screened by human experts before any publication decision (<a href="#" class="figref" data-fig="fig1">Figure 1</a>). Each output receives a binary pass or fail judgement on three dimensions — feasibility, identification credibility, and output consistency — and the final label is decided by majority rule. Across 240 generated studies, screening removed 38% of outputs while preserving nearly all sound analyses.</p>
+          <h2 class="sech" id="sec-1">1&nbsp;&nbsp;Introduction</h2>
+          <p>AI systems increasingly produce end-to-end research artifacts: a hypothesis, an estimation strategy, executable code, and a written interpretation. The convenience is real, but so is the risk that fluent text conceals a broken design. This paper asks how little human attention is enough to keep AI-assisted research trustworthy.</p>
+          <p id="p-intro2"><a href="#" class="figref" data-fig="fig1">Figure 1</a> illustrates the oversight pipeline. A task specification is expanded by the model into a draft study, the analysis is executed against real data, and the packaged output is routed to expert screening. The three screening dimensions and the pass rule for each are summarized in <a href="#" class="figref" data-fig="tab1">Table 1</a>.</p>
+          <figure class="docfig" id="anchor-fig1" data-fig="fig1" data-label="Figure 1">
+            <div class="figbody" id="fb-fig1">
+              <svg viewBox="0 0 640 104" role="img" aria-label="Oversight pipeline: task spec, model draft, executed analysis, expert screening, publish or reject">
+                <defs><marker id="ar1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="#8f8f8a"/></marker></defs>
+                <g font-family="Helvetica,Arial,sans-serif" font-size="11.5" fill="#333">
+                  <rect x="10" y="30" width="100" height="44" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="60" y="56" text-anchor="middle">Task spec</text>
+                  <rect x="138" y="30" width="100" height="44" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="188" y="56" text-anchor="middle">Model draft</text>
+                  <rect x="266" y="30" width="100" height="44" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="316" y="50" text-anchor="middle">Executed</text><text x="316" y="64" text-anchor="middle">analysis</text>
+                  <rect x="394" y="30" width="100" height="44" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="444" y="50" text-anchor="middle">Expert</text><text x="444" y="64" text-anchor="middle">screening</text>
+                  <rect x="522" y="30" width="100" height="44" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="572" y="50" text-anchor="middle">Publish /</text><text x="572" y="64" text-anchor="middle">reject</text>
+                </g>
+                <g stroke="#8f8f8a" stroke-width="1.4">
+                  <line x1="110" y1="52" x2="131" y2="52" marker-end="url(#ar1)"/>
+                  <line x1="238" y1="52" x2="259" y2="52" marker-end="url(#ar1)"/>
+                  <line x1="366" y1="52" x2="387" y2="52" marker-end="url(#ar1)"/>
+                  <line x1="494" y1="52" x2="515" y2="52" marker-end="url(#ar1)"/>
+                </g>
+              </svg>
+            </div>
+            <figcaption><b>Figure 1:</b> the oversight pipeline — model-drafted studies are executed, packaged, and routed to expert screening before any publication decision.</figcaption>
+          </figure>
+          <div class="pageno">1</div>
+        </section>
+
+        <section class="page" data-page="2">
+          <h2 class="sech" id="sec-2">2&nbsp;&nbsp;Evaluation dimensions</h2>
+          <p>Screening asks three questions. Feasibility: can the proposed analysis be run at all on the available data? Identification credibility: does the empirical strategy support a causal reading? Output consistency: do the reported numbers, tables, and narrative agree with one another?</p>
+          <p id="p-did">Failures take recognizable forms. A study may request variables that do not exist, or apply difference-in-differences without a valid comparison group, or report coefficients that contradict its own tables. <a href="#" class="figref" data-fig="tab1">Table 1</a> lists the pass criterion reviewers apply on each dimension.</p>
+          <figure class="docfig" id="anchor-tab1" data-fig="tab1" data-label="Table 1">
+            <div class="figbody" id="fb-tab1">
+              <table class="doctab">
+                <thead><tr><th>Dimension</th><th>Key question</th><th>Pass rule</th></tr></thead>
+                <tbody>
+                  <tr><td>Feasibility</td><td>Can it run on the data?</td><td>Required variables exist; code executes end to end</td></tr>
+                  <tr><td>Identification</td><td>Is a causal reading defensible?</td><td>Key assumptions plausible; confounders addressed</td></tr>
+                  <tr><td>Consistency</td><td>Do numbers and text agree?</td><td>Coefficients match tables; claims verifiable</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <figcaption><b>Table 1:</b> screening dimensions with the pass rule applied by each reviewer.</figcaption>
+          </figure>
+          <h2 class="sech" id="sec-3">3&nbsp;&nbsp;Evaluation procedure</h2>
+          <p id="p-fig2ref">As shown in <a href="#" class="figref" data-fig="fig2">Figure 2</a>, each generated output is judged independently by three expert reviewers. Every reviewer returns a pass or fail judgement on all three dimensions, and the final label on each dimension follows majority rule — at least two of three.</p>
+          <p id="p-kappa">Reviewers never see one another's judgements. Inter-rater agreement is summarized with mean pairwise Cohen's κ, computed per dimension and pooled across the corpus.</p>
+          <div class="pageno">2</div>
+        </section>
+
+        <section class="page" data-page="3">
+          <figure class="docfig" id="anchor-fig2" data-fig="fig2" data-label="Figure 2">
+            <div class="figbody" id="fb-fig2">
+              <svg viewBox="0 0 640 200" role="img" aria-label="Three independent reviewers judge each output; majority vote decides the final label">
+                <defs><marker id="ar2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="#8f8f8a"/></marker></defs>
+                <g font-family="Helvetica,Arial,sans-serif" font-size="11.5" fill="#333">
+                  <rect x="24" y="78" width="124" height="44" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="86" y="104" text-anchor="middle">Generated output</text>
+                  <rect x="252" y="20" width="146" height="38" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="325" y="44" text-anchor="middle">Reviewer 1</text>
+                  <rect x="252" y="81" width="146" height="38" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="325" y="105" text-anchor="middle">Reviewer 2</text>
+                  <rect x="252" y="142" width="146" height="38" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="325" y="166" text-anchor="middle">Reviewer 3</text>
+                  <rect x="486" y="78" width="130" height="44" rx="4" fill="#f7f6f2" stroke="#9a988f"/><text x="551" y="98" text-anchor="middle">Majority vote</text><text x="551" y="113" text-anchor="middle" font-size="10.5" fill="#777">at least 2 of 3</text>
+                </g>
+                <g stroke="#8f8f8a" stroke-width="1.4" fill="none">
+                  <line x1="148" y1="100" x2="246" y2="41" marker-end="url(#ar2)"/>
+                  <line x1="148" y1="100" x2="246" y2="100" marker-end="url(#ar2)"/>
+                  <line x1="148" y1="100" x2="246" y2="159" marker-end="url(#ar2)"/>
+                  <line x1="398" y1="41" x2="480" y2="93" marker-end="url(#ar2)"/>
+                  <line x1="398" y1="100" x2="480" y2="100" marker-end="url(#ar2)"/>
+                  <line x1="398" y1="159" x2="480" y2="107" marker-end="url(#ar2)"/>
+                </g>
+              </svg>
+            </div>
+            <figcaption><b>Figure 2:</b> three independent reviewers judge each output; disagreements are resolved by majority vote.</figcaption>
+          </figure>
+          <h2 class="sech" id="sec-4">4&nbsp;&nbsp;Results</h2>
+          <p id="p-res1">The protocol in <a href="#" class="figref" data-fig="fig2">Figure 2</a> removed 91 of 240 generated studies. Most rejections came from identification credibility, matching the pattern anticipated in <a href="#" class="figref" data-fig="tab1">Table 1</a>: fluent designs with no credible counterfactual.</p>
+          <p>Agreement was substantial. Pooled κ reached 0.74 for feasibility, 0.61 for identification credibility, and 0.69 for output consistency — high enough that a short expert screen is reliable to act on.</p>
+          <h2 class="sech" id="sec-5">5&nbsp;&nbsp;Conclusion</h2>
+          <p>A few minutes of structured human attention filters most unsound AI-generated research while keeping the sound majority. Oversight, not authorship, may be the scarce human contribution to machine-drafted science.</p>
+          <h2 class="sech" id="sec-ref">References</h2>
+          <p class="refs">[1] A. Idris and T. Vogel. Screening machine-written analyses at scale. 2025.<br>[2] L. Chen and R. Gomez. Majority rules for small expert panels. 2024.</p>
+          <div class="pageno">3</div>
+        </section>
+      </div>
+    </div>
+
+    <aside id="panel" aria-label="Margin 패널">
+      <div class="ptabs">
+        <button class="ptab on" data-t="toc">목차</button>
+        <button class="ptab" data-t="fig">그림·표</button>
+        <button class="ptab" data-t="memo">메모 <span id="memoTabN"></span></button>
+        <span class="sp"></span>
+        <button class="pico on" id="pinBtn" title="고정됨 — 클릭해 해제" aria-label="패널 고정">⌖</button>
+        <button class="pico" id="closeBtn" title="패널 닫기" aria-label="패널 닫기">✕</button>
+      </div>
+      <div class="pbody">
+        <div class="tabpage" data-t="toc"><div id="tocList"></div></div>
+        <div class="tabpage" data-t="fig" hidden>
+          <div id="figDetail" hidden>
+            <div class="figlabelrow"><span class="figlabel" id="figLabel"></span><span class="chipmini" id="figPage"></span></div>
+            <div class="prevcard" id="figPreview"></div>
+            <p class="pcap" id="figCap"></p>
+            <div class="btnrow"><button class="btn" id="figGoto">원문 위치로 이동</button><button class="btn" id="figMemo">메모 달기</button></div>
+            <div class="subh" id="mentionHead"></div>
+            <div id="mentions"></div>
+          </div>
+          <div id="figEmpty" class="empty">본문의 Figure / Table 링크를 클릭하면 여기에 그림이 뜹니다. 아래 목록에서 바로 골라볼 수도 있어요.</div>
+          <div class="subh">이 문서의 그림·표 <span id="figN"></span></div>
+          <div id="figList"></div>
+        </div>
+        <div class="tabpage" data-t="memo" hidden>
+          <div id="composeSlot"></div>
+          <div class="pens" id="pensRow"><span class="penlab">형광펜</span>
+            <button class="pen on" data-c="amber" style="background:#EF9F27" aria-label="주황 형광펜"></button>
+            <button class="pen" data-c="teal" style="background:#1D9E75" aria-label="초록 형광펜"></button>
+            <button class="pen" data-c="pink" style="background:#D4537E" aria-label="분홍 형광펜"></button>
+            <button class="pen" data-c="blue" style="background:#378ADD" aria-label="파랑 형광펜"></button>
+          </div>
+          <p class="memohint">본문을 드래그하면 형광펜이 칠해집니다. 패널이 열려 있으면 바로 메모 작성, 닫혀 있으면 조용히 저장되고 여백에 점만 남아요 — 점이나 형광펜을 클릭하면 이어서 씁니다.</p>
+          <input class="search" id="memoSearch" placeholder="메모·인용문 검색">
+          <div class="subh">이 문서의 메모 <span id="memoCount"></span></div>
+          <div id="memoList"></div>
+        </div>
+      </div>
+    </aside>
+    <div id="edge" hidden title="패널 열기">‹</div>
+  </div>
+</div>
+
+<div class="view" id="viewHub" hidden>
+  <div id="hub">
+    <div class="hubwrap">
+      <div class="hubhead"><h1>메모</h1><span id="hubCount"></span><span class="sp"></span><input id="hubSearch" placeholder="메모·인용문 검색"></div>
+      <div class="chiprow" id="hubChips"></div>
+      <div id="hubGroups"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// This file is the static interactive demo supplied during project setup.
+// Keep it as a reference artifact; production code lives under src/.
+</script>
+</body>
+</html>

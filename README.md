@@ -6,12 +6,13 @@ For implementation work, [docs/implementation-plan.md](docs/implementation-plan.
 
 ## Current Status
 
-M0 and M1 are complete. M2 highlight and memo storage work is in progress.
+M0, M1, and the first M2 implementation pass are complete. M2 still needs manual Chrome QA for drag highlight, memo restore, and zoom positioning.
 
 ## Spec
 
 - [Implementation Plan](docs/implementation-plan.md)
 - [UI Demo](docs/margin-demo.html)
+- [Progress Log](docs/progress.md)
 
 ## Milestones
 

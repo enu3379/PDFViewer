@@ -217,47 +217,25 @@ onMouseUp:
 
 ---
 
-## 5. 참조 링크·캡션·그림 영역 감지 (`core/detect.ts`)
+## 5. 참조 링크·캡션·그림 영역 감지
 
-모든 감지는 **스케일 1 뷰포트 좌표**에서 계산하고, 최종 region만 PDF space로 변환해 저장한다.
+### 5.1–5.3 캡션·영역 감지 → 외부 엔진(fig-extract)으로 대체 [개정]
 
-### 5.1 라인 그룹핑 (공통 전처리)
+> 원래 이 절에 있던 자체 감지 휴리스틱(라인 그룹핑·캡션 정규식·여백 밴드법)및 detect.ts 모듈은 구현하지 않는다.
+> figure 캡션·영역 감지는 별도 저장소(figure-preview-test)에서 개발·검증되는
+> **fig-extract 엔진**(`core/fig-extract.js`, vendored)이 담당한다. 
 
-```text
-buildLines(page):
-  tc = page.getTextContent()
-  각 item → { str, x, yTop, w, h }  // transform과 viewport(scale=1)로 환산
-  y 중심이 (h * 0.6) 이내인 item끼리 같은 라인으로 클러스터
-  라인 = { text(간격순 join), x0, x1, yTop, h, startOffset }  // startOffset = S_p 기준 라인 시작 오프셋
-  bodyH = 페이지 라인 높이의 중앙값, colX0/colX1 = 라인 x0/x1의 5/95 퍼센타일
-```
+- 사용: `core/fig-engine.ts`의 `FigExtract.extract()` → `toFigureEntries()`로 `FigureEntry` 생성.
+  좌표 변환(`toPdfRect`, 엔진의 좌상단 원점 pt → PDF user space) 포함.
+- **문서 내 figure 목록(존재·번호·region·captionText)의 단일 진실 공급원은 엔진이다.**
+- `captionAnchor`는 엔진이 반환한 `captionText`를 해당 페이지 `S_p`에서 검색해 Margin 측이 채운다.
+- 엔진 미감지(figures에 없음) 또는 region 이상 시의 안전망은 §6 수동 크롭 그대로.
+- `confidence`는 현재 엔진이 1.0 고정으로 반환(placeholder). 실측 매핑 도입 전까지
+  "영역 확인 필요" 배지는 수동 크롭 유도 용도로만 사용.
+- 상세 규약(갱신 절차, 좌표계, 제한사항): `docs/fig-extract-integration.md`
+- 제한: 엔진은 Table 미지원(v1은 수동 크롭으로 처리), 스캔 PDF(텍스트 레이어 없음)는 figures 빈 배열.
 
-### 5.2 캡션 감지 → FigureEntry 생성
-
-- 캡션 정규식(라인 시작): `/^\s*(Figure|Fig\.?|Table|TABLE)\s+(\d+[a-zA-Z]?)\s*[.:]/`
-- 매치 라인 + "이어지는 캡션 줄"(다음 라인이 dy ≤ 1.6·bodyH이고 x0가 비슷하며, 본문 문단 시작으로 보이지 않는 경우)을 병합해 `captionText`로 저장.
-- `captionAnchor.start` = 캡션 첫 라인의 startOffset, `end` = 마지막 캡션 라인 끝 오프셋.
-- `kind` = Figure→figure, Table→table. `id` = `${kind==='figure'?'fig':'tab'}${num}-p${page}`.
-- 같은 label이 여러 페이지에서 감지되면(드묾) 첫 것을 정식으로, 나머지는 무시하고 콘솔 경고.
-
-### 5.3 그림 영역 휴리스틱 (v1: 여백 밴드법)
-
-```text
-detectRegion(entry):
-  above = 캡션 위쪽 여백(캡션 yTop − 바로 위 라인 bottom)
-  below = 캡션 아래쪽 여백(다음 라인 yTop − 캡션 bottom)
-  side  = (kind==='table') ? 여백이 큰 쪽 : 위쪽 우선(여백 < 0.8·bodyH면 반대쪽)
-  경계 = side 방향으로 라인을 스캔하며 "본문 라인"(w ≥ 0.6·(colX1−colX0) 이고 0.8·bodyH ≤ h ≤ 1.3·bodyH)
-         또는 페이지 여백을 만나면 정지
-  rect = [colX0, 경계, colX1, 캡션 인접변] − 안쪽 패딩 4pt
-  confidence: 본문 라인 양쪽 경계로 닫히고 높이가 40pt~페이지의 70%면 0.9,
-              페이지 여백에 닿았으면 0.6, 높이 < 40pt이거나 계산 불능이면 region=null
-```
-
-- `region === null` 또는 `confidence < 0.7`이면 그림·표 탭 프리뷰 카드에 "영역 확인 필요" 배지와 [영역 지정] 버튼을 강조한다 → 수동 크롭(§6)이 안전망. 휴리스틱을 더 정교화하지 않는다.
-- getOperatorList 기반 이미지/벡터 bbox 분석은 phase 2 백로그.
-
-### 5.4 참조(멘션) 감지와 링크화
+### 5.4 참조(멘션) 감지와 링크화 (`core/mentions.ts`)
 
 - ref 정규식: `/\b(Fig(?:ure)?s?|Tab(?:le)?s?)\.?\s*(\d+[a-zA-Z]?)/g` — 각 매치를 `(kind, num)`으로 정규화해 FigureEntry에 매핑. 매핑 안 되는 번호는 무시. "Figures 2 and 3"은 첫 숫자만(문서화된 v1 제한).
 - 캡션 자신: 매치 구간이 그 figure의 `captionAnchor` 범위 안이면 **mentions 목록에서 제외**하되, 라벨 토큰은 클릭 가능하게 링크화한다(R6, `data-cap="1"` 부여).
@@ -388,7 +366,10 @@ margin/
 │  │  ├─ store.ts              # storage 래퍼, 디바운스 저장, 스키마 버전
 │  │  ├─ text-index.ts         # S_p 캐시, 오프셋↔DOM 매핑
 │  │  ├─ anchor.ts             # 선택→Anchor, 재앵커, quads 계산
-│  │  ├─ detect.ts             # 라인 그룹핑, 캡션/영역/참조 감지
+│  │  ├─ fig-extract.js        # [vendored] figure 캡션·영역 감지 엔진 (수정 금지, §5.1–5.3 대체)
+│  │  ├─ fig-extract.d.ts      # 위 파일의 side-effect import 스텁
+│  │  ├─ fig-engine.ts         # 엔진 타입 래퍼 + FigureEntry 변환 (toPdfRect/toFigureEntries)
+│  │  ├─ mentions.ts           # 본문 멘션 스캔·링크화 (§5.4)
 │  │  ├─ render-region.ts      # 페이지 렌더 LRU + 크롭 캔버스
 │  │  └─ format.ts             # esc, [[]]·#태그 파싱/렌더, 날짜
 │  ├─ viewer/
@@ -400,11 +381,11 @@ margin/
 │  │  ├─ crop-mode.ts          # §6
 │  │  └─ panel/panel.ts, tab-toc.ts, tab-figures.ts, tab-memos.ts
 │  └─ hub/hub.html, hub.ts, hub.css
-└─ test/anchor.test.ts, detect.test.ts, format.test.ts + fixtures/*.json
+└─ test/anchor.test.ts, mentions.test.ts, format.test.ts + fixtures/*.json
 ```
 
 - 모듈 간 통신은 작은 이벤트 이미터 1개(`core/bus.ts`, on/emit 20줄)로 한다. 전역 상태 객체는 viewer/main.ts가 소유.
-- fixtures: 테스트 문서 2종의 특정 페이지 `getTextContent()` 결과를 JSON으로 저장해 detect/anchor 유닛 테스트에 사용(생성 스크립트 `scripts/make-fixture.mjs` 포함).
+- fixtures: 테스트 문서 2종의 특정 페이지 `getTextContent()` 결과를 JSON으로 저장해 mentions/anchor 유닛 테스트에 사용(생성 스크립트 `scripts/make-fixture.mjs` 포함). 엔진(fig-extract)의 회귀 테스트는 엔진 repo의 골든 스냅샷이 담당하므로 이 repo에서는 하지 않는다.
 
 ## 11. 마일스톤과 수용 기준
 
@@ -425,7 +406,7 @@ margin/
 - [ ] 테스트 문서 2종에서 Figure/Table 목록이 페이지와 함께 나오고, 본문 참조 클릭(R1)과 캡션 라벨 클릭(R6)으로 프리뷰가 뜬다.
 - [ ] 본문 언급 목록이 캡션을 제외하고(R7) 스니펫과 점프를 제공한다.
 - [ ] hyperref 링크가 있는 PDF에서 내부 링크 클릭이 점프 대신 패널을 연다.
-- [ ] detect.ts 유닛 테스트: fixture 기준 캡션 수·라벨·언급 수 일치.
+- [ ] mentions.ts 유닛 테스트: fixture 기준 언급 수 일치. (캡션·영역 감지는 fig-extract 엔진 결과를 그대로 사용 — 엔진 회귀는 엔진 테스트 전용 별도 repo에서 검증)
 
 **M4 — 수동 크롭**
 - [ ] R8/R9 전부 동작. 감지 실패 항목에서 [영역 지정]으로 프리뷰를 만들 수 있고, 저장 후 새로고침에도 manual region이 유지된다.

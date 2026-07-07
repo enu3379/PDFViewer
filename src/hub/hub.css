@@ -1,10 +1,14 @@
 :root {
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
-  --bg: #f2f0ea;
+  --serif: Georgia, 'Nanum Myeongjo', 'AppleMyungjo', 'Batang', 'Times New Roman', serif;
+  --bg: #f1efe8;
   --paper: #fff;
   --text: #2c2c2a;
-  --muted: #8a887f;
-  --line: #ddd9cf;
+  --muted: #8a877c;
+  --soft: #a5a296;
+  --line: #dad6ca;
+  --line-soft: #e7e4da;
+  --accent: #BA7517;
   --blue: #185FA5;
 }
 
@@ -31,8 +35,8 @@ body {
 
 .hub {
   max-width: 860px;
-  margin: 28px auto 80px;
-  padding: 0 22px;
+  margin: 44px auto 80px;
+  padding: 0 24px;
 }
 
 .hub-head {
@@ -41,30 +45,41 @@ body {
   gap: 12px;
 }
 
+.hub-mark {
+  display: block;
+  flex: none;
+}
+
 .hub-head h1 {
   margin: 0;
-  font-size: 20px;
+  font-family: var(--serif);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -.01em;
 }
 
 .search {
   margin-left: auto;
-  width: 230px;
-  border: 1px solid var(--line);
+  width: 240px;
+  border: 1px solid var(--line-soft);
   border-radius: 8px;
   background: var(--paper);
   color: var(--text);
   font-size: 12px;
-  padding: 7px 11px;
+  padding: 8px 11px;
+}
+
+.search::placeholder {
+  color: var(--soft);
 }
 
 .empty {
-  margin-top: 24px;
-  border: 1px solid #e4e1d8;
-  border-radius: 8px;
-  background: var(--paper);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-  padding: 16px;
+  margin-top: 28px;
+  color: var(--soft);
+  font-size: 12.5px;
+  line-height: 1.7;
+  text-align: center;
+  padding: 48px 16px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
 }
-

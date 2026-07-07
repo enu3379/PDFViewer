@@ -2,8 +2,14 @@ import type { DocId, DocMeta, FigureEntry, Highlight, Memo } from './types';
 
 const SCHEMA_VERSION_KEY = 'margin:schemaVersion';
 const DOCS_KEY = 'margin:docs';
+const SETTINGS_KEY = 'margin:settings';
 const SCHEMA_VERSION = 1;
 const SAVE_DELAY_MS = 500;
+
+export type Settings = {
+  autoIntercept?: boolean;
+  penTheme?: string;
+};
 
 export type DocData = {
   meta: DocMeta;
@@ -71,6 +77,17 @@ export class MarginStore {
     const got = await this.#storage.get(SCHEMA_VERSION_KEY);
     if (got[SCHEMA_VERSION_KEY] === SCHEMA_VERSION) return;
     await this.#storage.set({ [SCHEMA_VERSION_KEY]: SCHEMA_VERSION });
+  }
+
+  async loadSettings(): Promise<Settings> {
+    const got = await this.#storage.get(SETTINGS_KEY);
+    return (got[SETTINGS_KEY] as Settings | undefined) ?? {};
+  }
+
+  /** settings는 sw(자동 열기)와 뷰어(펜 테마)가 나눠 쓰므로 항상 병합 저장한다. */
+  async updateSettings(patch: Partial<Settings>): Promise<void> {
+    const current = await this.loadSettings();
+    await this.#storage.set({ [SETTINGS_KEY]: { ...current, ...patch } });
   }
 
   async loadDoc(meta: DocMeta): Promise<DocData> {

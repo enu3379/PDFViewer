@@ -24,6 +24,7 @@ export class HighlightOverlay {
   #memos: Memo[] = [];
   #lost = new Set<string>();
   #renderedPages = new Set<number>();
+  #activeId: string | null = null;
 
   constructor(pageAccess: PageAccess, callbacks: HighlightOverlayCallbacks) {
     this.#pageAccess = pageAccess;
@@ -34,6 +35,19 @@ export class HighlightOverlay {
     this.#highlights = highlights;
     this.#memos = memos;
     this.#lost = lost;
+  }
+
+  /** 편집 중(작성/수정)인 하이라이트를 강조 표시한다. null이면 강조 해제. */
+  setActive(highlightId: string | null): void {
+    if (this.#activeId === highlightId) return;
+    const affectedPages = new Set<number>();
+    for (const id of [this.#activeId, highlightId]) {
+      if (!id) continue;
+      const highlight = this.#highlights.find((candidate) => candidate.id === id);
+      if (highlight) affectedPages.add(highlight.anchor.page);
+    }
+    this.#activeId = highlightId;
+    for (const page of affectedPages) this.renderPage(page);
   }
 
   renderAll(): void {
@@ -86,6 +100,7 @@ export class HighlightOverlay {
 
   #renderHighlight(layer: HTMLElement, viewport: PageViewport, highlight: Highlight): void {
     const color = COLOR_CLASS[highlight.color];
+    const active = highlight.id === this.#activeId;
     const viewportRects = highlight.anchor.quads
       .map((quad) => normalizeViewportRect(viewport.convertToViewportRectangle(quad)))
       .filter((rect) => rect[2] - rect[0] > 0 && rect[3] - rect[1] > 0);
@@ -94,7 +109,7 @@ export class HighlightOverlay {
       const [left, top, right, bottom] = rect;
       const el = document.createElement('button');
       el.type = 'button';
-      el.className = `mgn-hl-rect mgn-hl-${color}`;
+      el.className = `mgn-hl-rect mgn-hl-${color}${active ? ' editing' : ''}`;
       el.dataset.hid = highlight.id;
       el.style.left = `${left}px`;
       el.style.top = `${top}px`;
@@ -108,7 +123,7 @@ export class HighlightOverlay {
     const hasMemo = this.#memos.some((memo) => memo.id === highlight.memoId);
     const dot = document.createElement('button');
     dot.type = 'button';
-    dot.className = `mgn-dot mgn-dot-${color} ${hasMemo ? 'solid' : 'hollow'}`;
+    dot.className = `mgn-dot mgn-dot-${color} ${hasMemo ? 'solid' : 'hollow'}${active ? ' editing' : ''}`;
     dot.dataset.hid = highlight.id;
     dot.style.top = `${first[1] + 4}px`;
     dot.title = hasMemo ? '메모 보기' : '메모 이어쓰기';

@@ -7,6 +7,7 @@ export type MemoTabCallbacks = {
   onDeleteHighlight: (highlightId: string) => void;
   onDeleteMemo: (memoId: string) => void;
   onJumpHighlight: (highlightId: string) => void;
+  onComposeHighlightChange: (highlightId: string | null) => void;
 };
 
 type MemoTabElements = {
@@ -20,6 +21,8 @@ type MemoTabElements = {
 
 type ComposeState = {
   highlightId: string;
+  // 이번 드래그로 방금 만든 하이라이트인지. 취소/Esc가 삭제(신규) vs 원복(기존)을 가른다.
+  isNew: boolean;
 };
 
 const PEN_COLORS: PenColor[] = ['amber', 'teal', 'pink', 'blue'];
@@ -47,17 +50,42 @@ export class MemoTab {
     this.render();
   }
 
-  openComposeForHighlight(highlightId: string): void {
-    this.#compose = { highlightId };
-    this.render();
+  openComposeForHighlight(highlightId: string, isNew = false): void {
+    this.#setCompose({ highlightId, isNew });
     window.requestAnimationFrame(() => {
-      this.#elements.composeSlot.querySelector<HTMLTextAreaElement>('#memoText')?.focus();
+      const textarea = this.#elements.composeSlot.querySelector<HTMLTextAreaElement>('#memoText');
+      textarea?.focus();
+      const caret = textarea?.value.length ?? 0;
+      textarea?.setSelectionRange(caret, caret);
     });
   }
 
+  /** 카드를 그냥 닫는다(비파괴). 하이라이트/메모는 그대로 유지. */
   closeCompose(): void {
-    this.#compose = null;
+    this.#setCompose(null);
+  }
+
+  /** 이번 편집을 되감는다. 신규 하이라이트면 삭제, 기존이면 수정 내용만 버리고 닫는다. */
+  cancelCompose(): void {
+    const compose = this.#compose;
+    if (!compose) return;
+    this.#setCompose(null);
+    if (compose.isNew) this.#callbacks.onDeleteHighlight(compose.highlightId);
+  }
+
+  #setCompose(state: ComposeState | null): void {
+    this.#compose = state;
+    this.#callbacks.onComposeHighlightChange(state?.highlightId ?? null);
     this.render();
+  }
+
+  /** 저장 버튼/Enter 공용 — 비어 있으면 하이라이트만 남기고 닫는다. */
+  #saveCompose(): void {
+    if (!this.#compose) return;
+    const highlightId = this.#compose.highlightId;
+    const text = this.#elements.composeSlot.querySelector<HTMLTextAreaElement>('#memoText')?.value.trim() ?? '';
+    this.closeCompose();
+    if (text) this.#callbacks.onSaveHighlightMemo(highlightId, text);
   }
 
   get composingHighlightId(): string | null {
@@ -92,20 +120,27 @@ export class MemoTab {
       const action = (event.target as HTMLElement).dataset.action;
       if (!action || !this.#compose) return;
       const highlightId = this.#compose.highlightId;
-      if (action === 'close') {
-        this.closeCompose();
+      if (action === 'cancel') {
+        this.cancelCompose();
       } else if (action === 'save') {
-        const text = this.#elements.composeSlot.querySelector<HTMLTextAreaElement>('#memoText')?.value.trim() ?? '';
-        if (text) this.#callbacks.onSaveHighlightMemo(highlightId, text);
-        this.closeCompose();
+        this.#saveCompose();
       } else if (action === 'delete-highlight') {
-        this.#callbacks.onDeleteHighlight(highlightId);
         this.closeCompose();
+        this.#callbacks.onDeleteHighlight(highlightId);
       } else if (action === 'delete-memo') {
         const memo = this.#memoForHighlight(highlightId);
-        if (memo) this.#callbacks.onDeleteMemo(memo.id);
         this.closeCompose();
+        if (memo) this.#callbacks.onDeleteMemo(memo.id);
       }
+    });
+
+    // Enter는 저장(Esc 취소와 대칭), Shift+Enter는 줄바꿈.
+    // 한글 IME 조합을 확정하는 Enter는 isComposing이라 저장으로 새지 않는다.
+    this.#elements.composeSlot.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+      if ((event.target as HTMLElement).id !== 'memoText') return;
+      event.preventDefault();
+      this.#saveCompose();
     });
 
     this.#elements.memoList.addEventListener('click', (event) => {
@@ -140,29 +175,59 @@ export class MemoTab {
 
     const highlight = this.#highlights.find((candidate) => candidate.id === this.#compose?.highlightId);
     if (!highlight) {
-      this.#elements.composeSlot.innerHTML = '';
+      // 하이라이트가 외부에서 사라졌으면 카드도 닫고 강조도 해제한다.
       this.#compose = null;
+      this.#callbacks.onComposeHighlightChange(null);
+      this.#elements.composeSlot.innerHTML = '';
       return;
     }
 
     const memo = this.#memoForHighlight(highlight.id);
+    const isNew = this.#compose.isNew;
+
+    // 리렌더(예: 펜 색 변경) 중에도 입력하던 메모가 날아가지 않게 현재 초안을 살린다.
+    const prev = this.#elements.composeSlot.querySelector<HTMLElement>('.compose');
+    const draft = prev?.dataset.hid === highlight.id
+      ? prev.querySelector<HTMLTextAreaElement>('#memoText')?.value
+      : undefined;
+    const text = draft ?? memo?.text ?? '';
+
+    // 진입 상태(신규/메모없음/메모있음)에 따라 상단 라벨·하단 버튼을 바꿔 "지금 뭐 하는 중"을 드러낸다.
+    const stateLabel = isNew ? '새 하이라이트' : memo ? '메모 편집' : '메모 추가';
+    const primaryLabel = isNew && !text.trim() ? '하이라이트만 저장' : '메모 저장';
+    const destructive = isNew
+      ? ''
+      : memo
+        ? '<button class="lnkbtn" data-action="delete-memo" type="button">메모 삭제</button><button class="lnkbtn danger" data-action="delete-highlight" type="button">하이라이트 삭제</button>'
+        : '<button class="lnkbtn danger" data-action="delete-highlight" type="button">하이라이트 삭제</button>';
+
     // design: 작성 카드는 데모처럼 인용문을 먼저 보여줘서 사용자가 현재 문맥을 놓치지 않게 한다.
     this.#elements.composeSlot.innerHTML = `
-      <div class="compose">
+      <div class="compose" data-hid="${escapeHtml(highlight.id)}">
+        <div class="cstate">${stateLabel}</div>
         <div class="cquote cquote-${highlight.color}">
           ${escapeHtml(highlight.anchor.quote)}
           <div class="cqmeta"><span class="chipmini">p.${highlight.anchor.page}</span><span>드래그한 문장이 자동 인용됨</span></div>
         </div>
-        <textarea id="memoText" class="cta" placeholder="메모를 입력하세요">${escapeHtml(memo?.text ?? '')}</textarea>
-        <div class="chint">[[제목]] 으로 노트 연결 · #태그</div>
+        <textarea id="memoText" class="cta" placeholder="메모를 입력하세요">${escapeHtml(text)}</textarea>
+        <div class="chint">[[제목]] 노트 연결 · #태그 · Enter 저장 · Shift+Enter 줄바꿈</div>
         <div class="crow">
-          ${memo ? '<button class="lnkbtn" data-action="delete-memo" type="button">메모 삭제</button>' : '<button class="lnkbtn" data-action="delete-highlight" type="button">하이라이트 삭제</button>'}
+          ${destructive}
           <span class="spacer"></span>
-          <button class="btn" data-action="close" type="button">닫기</button>
-          <button class="btn pri" data-action="save" type="button">저장</button>
+          <button class="btn" data-action="cancel" type="button">취소</button>
+          <button class="btn pri" data-action="save" type="button">${primaryLabel}</button>
         </div>
       </div>
     `;
+
+    // 신규 하이라이트는 입력 여부에 따라 주 버튼 라벨이 "하이라이트만 저장" ↔ "메모 저장"으로 바뀐다.
+    if (isNew) {
+      const textarea = this.#elements.composeSlot.querySelector<HTMLTextAreaElement>('#memoText');
+      const primary = this.#elements.composeSlot.querySelector<HTMLButtonElement>('.btn.pri');
+      textarea?.addEventListener('input', () => {
+        if (primary) primary.textContent = textarea.value.trim() ? '메모 저장' : '하이라이트만 저장';
+      });
+    }
   }
 
   #renderList(): void {

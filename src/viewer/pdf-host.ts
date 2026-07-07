@@ -70,6 +70,7 @@ export class PdfHost {
 
     this.eventBus.on('pagesinit', () => {
       this.viewer.currentScaleValue = 'page-width';
+      this.refreshLayoutSoon();
       this.#emitPageChange();
       this.#emitScaleChange('page-width');
     });
@@ -186,6 +187,20 @@ export class PdfHost {
     this.#emitScaleChange('page-width');
   }
 
+  refreshLayoutSoon(): void {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => this.refreshLayout());
+    });
+  }
+
+  refreshLayout(): void {
+    if (!this.#doc) return;
+    if (this.viewer.currentScaleValue === 'page-width') {
+      this.viewer.currentScaleValue = 'page-width';
+    }
+    this.viewer.update();
+  }
+
   async getOutlineItems(): Promise<FlatOutlineItem[]> {
     if (!this.#doc) return [];
     const outline = (await this.#doc.getOutline()) as OutlineNode[] | null;
@@ -233,6 +248,7 @@ export class PdfHost {
     };
     linkService.setDocument(doc, url ?? null);
     this.viewer.setDocument(doc);
+    this.refreshLayoutSoon();
   }
 
   async #resolveDestPage(dest: string | unknown[] | null): Promise<number | null> {

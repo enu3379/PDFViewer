@@ -2,6 +2,15 @@ import 'pdfjs-dist/web/pdf_viewer.css';
 import './viewer.css';
 import { createAnchorFromRange, repairAnchor } from '../core/anchor';
 import { parseLinks, parseTags } from '../core/format';
+import { parseViewableUrl } from '../core/pdf-url';
+import {
+  DEFAULT_PEN_THEME,
+  isPenTheme,
+  nextPenTheme,
+  PEN_NAMES,
+  PEN_THEME_LABELS,
+  type PenTheme
+} from '../core/pen-theme';
 import { makeId, MarginStore, type DocData } from '../core/store';
 import { buildPageTextIndex, type PageTextIndex } from '../core/text-index';
 import type { Highlight, Memo, PenColor } from '../core/types';
@@ -9,7 +18,6 @@ import { HighlightOverlay } from './overlay-highlights';
 import { MemoTab } from './panel/tab-memos';
 import { type FlatOutlineItem, PdfHost } from './pdf-host';
 
-const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'file:', 'blob:']);
 const PANEL_WIDTH_KEY = 'margin:panelWidth';
 const PANEL_MIN_WIDTH = 264;
 const PANEL_MAX_WIDTH = 560;
@@ -32,14 +40,7 @@ function readFileParam(): string | null {
     raw = rawTail;
   }
 
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return null;
-  }
-
-  return ALLOWED_SCHEMES.has(url.protocol) ? raw : null;
+  return parseViewableUrl(raw) ? raw : null;
 }
 
 function basenameFromUrl(value: string): string {
@@ -114,6 +115,7 @@ function setTab(tab: string): void {
 }
 
 function closePanel(): void {
+  memoTab.closeCompose();
   panel.hidden = true;
   edge.hidden = false;
   refreshFitWidthIfNeeded();
@@ -204,6 +206,7 @@ async function loadUrl(file: string): Promise<void> {
     await initializeDoc(basenameFromUrl(file), file);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     showOnly(readRow);
+    host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
@@ -219,6 +222,7 @@ async function loadSelectedFile(file: File): Promise<void> {
     await initializeDoc(file.name);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     showOnly(readRow);
+    host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
@@ -288,11 +292,8 @@ function repairPageAnchors(pageNumber: number): void {
       continue;
     }
     lostHighlights.delete(highlight.id);
-    if (
-      repaired.start !== highlight.anchor.start ||
-      repaired.end !== highlight.anchor.end ||
-      repaired.quads.length !== highlight.anchor.quads.length
-    ) {
+    // repairAnchor는 손댈 게 없으면 원본 객체를 그대로 반환한다. 새 객체면 무엇이든 갱신된 것.
+    if (repaired !== highlight.anchor) {
       highlight.anchor = repaired;
       changed = true;
     }
@@ -332,7 +333,7 @@ function handleSelection(): void {
 
   if (!panel.hidden) {
     openPanel('memos');
-    memoTab.openComposeForHighlight(highlight.id);
+    memoTab.openComposeForHighlight(highlight.id, true);
   }
 }
 
@@ -387,11 +388,13 @@ function deleteHighlight(highlightId: string): void {
 function deleteMemo(memoId: string): void {
   if (!docData) return;
   const memo = docData.memos.find((candidate) => candidate.id === memoId);
-  if (memo?.anchorType === 'highlight') {
-    deleteHighlight(memo.anchorId);
-    return;
-  }
+  if (!memo) return;
+  // 메모만 지우고 하이라이트는 남긴다(하이라이트 우선). dot은 hollow로 돌아간다.
   docData.memos = docData.memos.filter((candidate) => candidate.id !== memoId);
+  if (memo.anchorType === 'highlight') {
+    const highlight = docData.highlights.find((candidate) => candidate.id === memo.anchorId);
+    if (highlight) highlight.memoId = undefined;
+  }
   scheduleDocSave();
   syncAnnotationViews();
 }
@@ -616,6 +619,7 @@ const pinPanel = requireElement<HTMLButtonElement>('#pinPanel');
 const tocList = requireElement<HTMLElement>('#tocList');
 const composeSlot = requireElement<HTMLElement>('#composeSlot');
 const pensRow = requireElement<HTMLElement>('#pensRow');
+const penThemeButton = requireElement<HTMLButtonElement>('#penTheme');
 const memoSearch = requireElement<HTMLInputElement>('#memoSearch');
 const memoCount = requireElement<HTMLElement>('#memoCount');
 const memoTabN = requireElement<HTMLElement>('#memoTabN');
@@ -628,6 +632,33 @@ let docData: DocData | null = null;
 const store = new MarginStore();
 const pageIndexes = new Map<number, PageTextIndex>();
 const lostHighlights = new Set<string>();
+
+function setActivePen(color: PenColor): void {
+  currentPen = color;
+  document.documentElement.dataset.pen = color;
+}
+
+let penTheme: PenTheme = DEFAULT_PEN_THEME;
+
+function applyPenTheme(theme: PenTheme): void {
+  penTheme = theme;
+  document.documentElement.dataset.penTheme = theme;
+  // 버튼은 "누르면 바뀔 팔레트"를 보여준다.
+  penThemeButton.textContent = `${PEN_THEME_LABELS[nextPenTheme(theme)]} 팔레트`;
+  for (const pen of pensRow.querySelectorAll<HTMLButtonElement>('.pen')) {
+    const color = pen.dataset.color as PenColor | undefined;
+    if (!color) continue;
+    const label = `${PEN_NAMES[theme][color]} 형광펜`;
+    pen.setAttribute('aria-label', label);
+    pen.title = label;
+  }
+}
+
+penThemeButton.addEventListener('click', () => {
+  const next = nextPenTheme(penTheme);
+  applyPenTheme(next);
+  void store.updateSettings({ penTheme: next });
+});
 
 const host = new PdfHost(
   { container: viewerContainer, viewer: viewerElement },
@@ -658,7 +689,7 @@ const memoTab = new MemoTab(
   },
   {
     onPenChange: (color) => {
-      currentPen = color;
+      setActivePen(color);
       const composing = memoTab.composingHighlightId;
       const highlight = docData?.highlights.find((candidate) => candidate.id === composing);
       if (highlight) {
@@ -670,10 +701,18 @@ const memoTab = new MemoTab(
     onSaveHighlightMemo: saveHighlightMemo,
     onDeleteHighlight: deleteHighlight,
     onDeleteMemo: deleteMemo,
-    onJumpHighlight: jumpToHighlight
+    onJumpHighlight: jumpToHighlight,
+    onComposeHighlightChange: (highlightId) => overlay.setActive(highlightId)
   }
 );
 
+setActivePen(currentPen);
+applyPenTheme(penTheme);
+void store.loadSettings().then((settings) => {
+  if (isPenTheme(settings.penTheme) && settings.penTheme !== penTheme) {
+    applyPenTheme(settings.penTheme);
+  }
+});
 setupPanelResize();
 setupFileDrop();
 syncAnnotationViews();
@@ -723,7 +762,7 @@ pinPanel.addEventListener('click', () => {
 
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
-    memoTab.closeCompose();
+    memoTab.cancelCompose();
   }
 });
 

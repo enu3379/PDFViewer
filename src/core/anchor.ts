@@ -69,7 +69,15 @@ export function mergeLineRects(rects: RectLike[]): RectLike[] {
   for (const rect of sorted) {
     const last = merged.at(-1);
     if (!last || verticalOverlapRatio(last, rect) < 0.6) {
-      merged.push({ ...rect });
+      // DOMRect의 좌표는 프로토타입 getter라 스프레드가 빈 객체를 만든다. 명시적으로 복사한다.
+      merged.push({
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height
+      });
       continue;
     }
     last.left = Math.min(last.left, rect.left);
@@ -128,7 +136,9 @@ export function repairAnchor(
   pageDiv: HTMLElement,
   viewport: PageViewport
 ): Anchor | null {
-  if (index.text.slice(anchor.start, anchor.end) === anchor.quote) {
+  // 과거 버그로 quads가 NaN(직렬화 시 null)으로 저장된 앵커는 오프셋이 맞아도 다시 만든다.
+  const quadsValid = anchor.quads.length > 0 && anchor.quads.every((quad) => quad.every(Number.isFinite));
+  if (quadsValid && index.text.slice(anchor.start, anchor.end) === anchor.quote) {
     return anchor;
   }
 

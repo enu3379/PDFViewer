@@ -31,4 +31,13 @@ npm run build
 npm test
 ```
 
+On Windows, if npm scripts fail with `"node" is not recognized` even though
+`node --version` works in PowerShell, use the Windows fallback scripts:
+
+```sh
+npm run typecheck:win
+npm run build:win
+npm run test:win
+```
+
 Load `dist/` as an unpacked extension in `chrome://extensions`.

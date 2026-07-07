@@ -5,9 +5,13 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:win": "scripts\\run-node.cmd node_modules/vite/bin/vite.js build",
     "dev": "vite build --watch",
+    "dev:win": "scripts\\run-node.cmd node_modules/vite/bin/vite.js build --watch",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "test:win": "scripts\\run-node.cmd node_modules/vitest/vitest.mjs run",
+    "typecheck": "tsc --noEmit",
+    "typecheck:win": "scripts\\run-node.cmd node_modules/typescript/bin/tsc --noEmit"
   },
   "dependencies": {
     "pdfjs-dist": "4.10.38"

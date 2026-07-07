@@ -15,6 +15,7 @@ import { makeId, MarginStore, type DocData } from '../core/store';
 import { buildPageTextIndex, type PageTextIndex } from '../core/text-index';
 import type { Highlight, Memo, PenColor } from '../core/types';
 import { HighlightOverlay } from './overlay-highlights';
+import { FiguresTab } from './panel/tab-figures';
 import { MemoTab } from './panel/tab-memos';
 import { type FlatOutlineItem, PdfHost } from './pdf-host';
 
@@ -166,6 +167,7 @@ async function initializeDoc(titleFallback: string, url?: string): Promise<void>
   buildRenderedPageIndexes();
   syncAnnotationViews();
   repairRenderedPages();
+  figuresTab.setDocument(host.pdfDocument);
 }
 
 function markTocForPage(page: number): void {
@@ -617,6 +619,7 @@ const edge = requireElement<HTMLButtonElement>('#edge');
 const closePanelButton = requireElement<HTMLButtonElement>('#closePanel');
 const pinPanel = requireElement<HTMLButtonElement>('#pinPanel');
 const tocList = requireElement<HTMLElement>('#tocList');
+const figList = requireElement<HTMLElement>('#figList');
 const composeSlot = requireElement<HTMLElement>('#composeSlot');
 const pensRow = requireElement<HTMLElement>('#pensRow');
 const penThemeButton = requireElement<HTMLButtonElement>('#penTheme');
@@ -748,8 +751,19 @@ pageNumberInput.addEventListener('change', () => {
   setPageUi(host.currentPage, host.pageCount);
 });
 
+const figuresTab = new FiguresTab(figList, {
+  onJumpToPage: (page) => {
+    host.setPage(page);
+    if (!pinned) closePanel();
+  }
+});
+
 for (const button of document.querySelectorAll<HTMLButtonElement>('.ptab')) {
-  button.addEventListener('click', () => setTab(button.dataset.tab ?? 'toc'));
+  button.addEventListener('click', () => {
+    const tab = button.dataset.tab ?? 'toc';
+    setTab(tab);
+    if (tab === 'figures') figuresTab.ensureScanned();
+  });
 }
 
 closePanelButton.addEventListener('click', closePanel);

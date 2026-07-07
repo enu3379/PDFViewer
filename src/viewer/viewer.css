@@ -939,3 +939,47 @@ body.resizing-panel .panel-resize::after {
     transition: none !important;
   }
 }
+
+/* 그림·표 탭 (tab-figures.ts) */
+.fig-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fig-card {
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid #e2e4e8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.fig-card:hover {
+  box-shadow: 0 2px 8px rgb(30 40 90 / 0.12);
+}
+
+.fig-card img {
+  display: block;
+  width: 100%;
+}
+
+.fig-card .fig-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 10px 0;
+  font-size: 12px;
+}
+
+.fig-card .fig-head span {
+  color: #778;
+}
+
+.fig-card .fig-cap {
+  max-height: 6.5em;
+  margin: 6px 10px 10px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #556;
+}

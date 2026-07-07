@@ -1,12 +1,17 @@
 :root {
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
   --bg: #dcd9d1;
+  --chrome: #f7f5f0;
+  --rail: #f0eee8;
   --panel: #fbfaf6;
   --paper: #fff;
   --text: #2c2c2a;
   --muted: #8a887f;
+  --soft: #9a988f;
   --line: #d8d5cc;
+  --line-soft: #e4e1d8;
   --blue: #185FA5;
+  --blue-deep: #0C447C;
   --blue-soft: #E6F1FB;
 }
 
@@ -25,6 +30,7 @@ body {
 
 body {
   margin: 0;
+  overflow: hidden;
   font-family: var(--sans);
   background: var(--bg);
   color: var(--text);
@@ -41,34 +47,43 @@ input {
 }
 
 .app-shell {
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .toolbar {
-  height: 42px;
+  height: 38px;
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 12px;
-  padding: 0 14px;
-  background: #f7f5f0;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--chrome);
   border-bottom: 1px solid var(--line);
 }
 
 .brand {
   font-size: 13px;
   font-weight: 700;
-  color: #0C447C;
+  color: var(--blue-deep);
 }
 
 .file-label {
-  min-width: 0;
+  max-width: min(34vw, 420px);
+  min-width: 80px;
   overflow: hidden;
-  color: var(--muted);
+  color: #5f5e5a;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--line);
 }
 
 .spacer {
@@ -76,31 +91,113 @@ input {
 }
 
 .toolbar-button,
-.file-button {
+.file-button,
+.icon-button {
   border: 1px solid #d5d2c8;
   background: #fff;
   border-radius: 7px;
   color: #3a3a37;
   cursor: pointer;
   font-size: 12px;
+}
+
+.toolbar-button,
+.file-button {
   padding: 5px 10px;
 }
 
+.icon-button {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
 .toolbar-button:hover,
-.file-button:hover {
+.file-button:hover,
+.icon-button:hover {
   background: #f2f0ea;
 }
 
-.reader {
+.icon-button:disabled {
+  cursor: default;
+  color: #b0aea4;
+  background: #f3f1eb;
+}
+
+.page-jump {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.page-jump input {
+  width: 42px;
+  height: 26px;
+  border: 1px solid #ddd9cf;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--text);
+  padding: 0 7px;
+  text-align: right;
+}
+
+.zoom-label {
+  width: 54px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.reader-shell {
   flex: 1;
-  display: grid;
-  place-items: center;
-  padding: 28px;
+  min-height: 0;
   background: #e4e1da;
 }
 
+.read-row {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+}
+
+.pdf-scroll {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 26px 0 80px;
+  background: #e4e1da;
+}
+
+#viewer.pdfViewer {
+  --scale-factor: 1;
+}
+
+#viewer.pdfViewer .page {
+  margin: 0 auto 26px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .07);
+}
+
+#viewer.pdfViewer .page:last-child {
+  margin-bottom: 0;
+}
+
+#viewer.pdfViewer .textLayer ::selection {
+  background: #bcd7f0;
+}
+
 .empty-state {
-  width: min(520px, 100%);
+  width: min(520px, calc(100% - 56px));
+  margin: 56px auto;
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -118,6 +215,7 @@ input {
   color: #5f5e5a;
   font-size: 13px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .file-button {
@@ -132,5 +230,152 @@ input {
   margin-top: 12px !important;
   color: #9a988f !important;
   font-size: 11.5px !important;
+}
+
+.error-state {
+  border-color: #d8b5b5;
+}
+
+#panel {
+  width: 312px;
+  flex: none;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--bg);
+}
+
+.ptabs {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 9px 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ptab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 3px 9px 8px;
+}
+
+.ptab.on {
+  color: var(--blue-deep);
+  border-bottom-color: var(--blue);
+  font-weight: 600;
+}
+
+.pico {
+  border: 0;
+  background: none;
+  color: #a09e95;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px 8px;
+}
+
+.pico.on {
+  color: var(--blue);
+}
+
+.pbody {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.empty {
+  color: #9a988f;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 2px;
+}
+
+.toc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toc-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #3a3a37;
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 7px 9px 7px calc(9px + var(--depth, 0) * 12px);
+  text-align: left;
+}
+
+.toc-row:hover {
+  background: #f2f0e9;
+}
+
+.toc-row.on {
+  background: var(--blue-soft);
+  color: var(--blue-deep);
+}
+
+.toc-row span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toc-page {
+  margin-left: auto;
+  color: #9a988f;
+  font-size: 11px;
+}
+
+.toc-row.on .toc-page {
+  color: #3a76ad;
+}
+
+.edge {
+  width: 26px;
+  flex: none;
+  border: 0;
+  border-left: 1px solid var(--bg);
+  background: var(--rail);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+}
+
+.edge:hover {
+  background: #e9e6df;
+  color: var(--blue);
+}
+
+@media (max-width: 900px) {
+  #panel {
+    width: 264px;
+  }
+
+  .file-label {
+    max-width: 22vw;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 

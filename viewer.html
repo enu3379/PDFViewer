@@ -10,11 +10,24 @@
     <div id="app" class="app-shell">
       <header class="toolbar">
         <div class="brand">Margin</div>
-        <div id="fileLabel" class="file-label"></div>
+        <div id="fileLabel" class="file-label">빈 뷰어</div>
+        <div class="toolbar-divider"></div>
+        <button id="prevPage" class="icon-button" type="button" aria-label="이전 페이지">‹</button>
+        <label class="page-jump" aria-label="현재 페이지">
+          <input id="pageNumber" inputmode="numeric" value="1">
+          <span>/</span>
+          <span id="pageCount">0</span>
+        </label>
+        <button id="nextPage" class="icon-button" type="button" aria-label="다음 페이지">›</button>
+        <div class="toolbar-divider"></div>
+        <button id="zoomOut" class="icon-button" type="button" aria-label="축소">−</button>
+        <span id="zoomLabel" class="zoom-label">100%</span>
+        <button id="zoomIn" class="icon-button" type="button" aria-label="확대">+</button>
+        <button id="fitWidth" class="toolbar-button" type="button">폭 맞춤</button>
         <div class="spacer"></div>
         <button id="hubButton" class="toolbar-button" type="button">허브</button>
       </header>
-      <main class="reader">
+      <main class="reader-shell">
         <section id="emptyState" class="empty-state" hidden>
           <h1>PDF를 여세요</h1>
           <p>파일을 선택하거나 PDF 탭에서 확장 아이콘을 눌러 Margin 뷰어로 전환하세요.</p>
@@ -25,13 +38,43 @@
           <p class="hint">로컬 PDF는 Chrome 확장 설정에서 파일 URL 접근 허용이 필요할 수 있습니다.</p>
         </section>
         <section id="pendingState" class="empty-state" hidden>
-          <h1>PDF 로드 준비됨</h1>
+          <h1>PDF를 불러오는 중입니다</h1>
           <p id="pendingUrl"></p>
-          <p class="hint">PDF.js 렌더링은 M1에서 연결합니다.</p>
+          <p class="hint">문서 크기와 네트워크 상태에 따라 잠시 걸릴 수 있습니다.</p>
+        </section>
+        <section id="errorState" class="empty-state error-state" hidden>
+          <h1>PDF를 열 수 없습니다</h1>
+          <p id="errorMessage"></p>
+        </section>
+        <section id="readRow" class="read-row" hidden>
+          <div id="viewerContainer" class="pdf-scroll" tabindex="0">
+            <div id="viewer" class="pdfViewer"></div>
+          </div>
+          <aside id="panel" aria-label="Margin 패널">
+            <div class="ptabs">
+              <button class="ptab on" data-tab="toc" type="button">목차</button>
+              <button class="ptab" data-tab="figures" type="button">그림·표</button>
+              <button class="ptab" data-tab="memos" type="button">메모 <span id="memoTabN"></span></button>
+              <span class="spacer"></span>
+              <button class="pico on" id="pinPanel" title="고정됨 — 클릭해 해제" aria-label="패널 고정" type="button">⌖</button>
+              <button class="pico" id="closePanel" title="패널 닫기" aria-label="패널 닫기" type="button">✕</button>
+            </div>
+            <div class="pbody">
+              <section class="tab-page" data-tab="toc">
+                <div id="tocList" class="toc-list"></div>
+              </section>
+              <section class="tab-page" data-tab="figures" hidden>
+                <div class="empty">그림·표 가져오기 기능은 별도 모듈로 연결할 예정입니다.</div>
+              </section>
+              <section class="tab-page" data-tab="memos" hidden>
+                <div class="empty">메모와 하이라이트는 M2에서 구현합니다.</div>
+              </section>
+            </div>
+          </aside>
+          <button id="edge" class="edge" type="button" hidden title="패널 열기" aria-label="패널 열기">‹</button>
         </section>
       </main>
     </div>
     <script type="module" src="/src/viewer/main.ts"></script>
   </body>
 </html>
-

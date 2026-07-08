@@ -2,7 +2,7 @@
 
 - 배경: 2026-07-09 QA 중 은우 피드백 5건. 대부분 implementation-plan §5.4~§8의 **계획됨·미구현** 조각과 일치하며,
   본 문서는 그 조각들을 사용자 의도에 맞게 확정하고 구현 순서를 정한다.
-- 작성: Claude(설계/기획). 구현은 Codex — §6 태스크. **이슈 #1 브랜치와 분리해 `dev/figure-ux`에서 진행**(이 문서만 먼저 커밋).
+- 작성: Claude(설계/기획). 구현은 Codex — §6 태스크. **이슈 #1 브랜치와 분리해 `feature/figure-ux`에서 진행**(이 문서만 먼저 커밋).
 - 상태: **DC-F1 확정(B — 패널 경유, 2026-07-09 은우). G1–G8 착수 가능.**
 - 관련 정본: implementation-plan §5.4(멘션)·§5.5(프리뷰 렌더)·§6(수동 크롭)·§7(캡션 라벨)·§8(그림·표 탭 상세),
   fig-extract-integration.md(엔진 경계 — captionAnchor·mentions·수동 크롭은 Margin 담당).
@@ -107,7 +107,7 @@ jumpToRegion(page, rectPdf)     // 세로 중앙(큰 region은 1/8) + region 플
   (플로팅 "돌아가기" 칩은 원점 언급 칩(§3 복귀 디테일)이 대체 — 별도 UI 없음)
 - 엔진(fig-extract) 수정 일절 없음 — 감지 품질 이슈는 엔진 repo로 전달.
 
-## 6. 구현 태스크 (Codex, `dev/figure-ux`)
+## 6. 구현 태스크 (Codex, `feature/figure-ux`)
 
 > 공통: typecheck·test·build 통과. 순수 로직(mentions 정규식·anchor 검색·정렬 계산)은 vitest 커버.
 

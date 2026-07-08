@@ -71,8 +71,8 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
 
 ## Next
 
-- 이슈 #1 대응: C1–C8 + 리뷰 후속 R1–R3 반영 완료 (`dev/issue-1-open-ux` 브랜치) — macOS + Windows 수동 Chrome QA 필요.
-- 피규어 UX 개정: [figure-ux.md](figure-ux.md) 설계 확정(DC-F1=패널 경유, 참조↔피규어 양방향 링크, 점프 1/8 정렬+플래시, 카드 크롭 아이콘, 캡션 라벨) — `dev/figure-ux` 브랜치에서 G1–G8 구현 착수 가능.
+- 이슈 #1 대응: C1–C8 + 리뷰 후속 R1–R3 반영 완료 (`feature/1-open-ux` 브랜치) — macOS + Windows 수동 Chrome QA 필요.
+- 피규어 UX 개정: [figure-ux.md](figure-ux.md) 설계 확정(DC-F1=패널 경유, 참조↔피규어 양방향 링크, 점프 1/8 정렬+플래시, 카드 크롭 아이콘, 캡션 라벨) — `feature/figure-ux` 브랜치에서 G1–G8 구현 착수 가능.
 - Finish M2 manual QA fixes.
 - Keep figure/table extraction out of the immediate path until the separate figure feature direction is decided.
 - After M2 acceptance, move to either Hub work or the separate figure workflow, depending on priority.

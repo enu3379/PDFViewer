@@ -245,6 +245,7 @@ onMouseUp:
 - 본문 멘션 전체 문서 스캔: FigureEntry가 준비된 뒤 백그라운드로 1페이지부터 순차 `getTextContent`(이미 캐시된 페이지는 재사용, 페이지당 idle 처리) → `{figId, page, start, end}[]` 완성 후 목록 갱신. 진행 중에는 "스캔 중 n/N" 표시. 결과는 세션 메모리 캐시.
 - 링크 DOM 주입: `textlayerrendered`마다 해당 페이지 매치들에 대해 span 내부 텍스트 노드를 Range로 잘라 `<a class="mgn-ref" data-fig …>`로 감싼다(데모의 wrapRange와 동일 기법, span 경계에 걸치면 조각별로 감싼다). 이미 감싼 페이지는 `dataset.mgnRefs='1'`로 멱등 처리. 단일 span 내 매치만 처리(경계에 걸린 극소수는 v1 제한).
 - PDF 자체 하이퍼링크(hyperref) 연동: `PDFLinkService`를 서브클래스해 `goToDestination(dest)`를 오버라이드 — dest를 페이지·좌표로 해석했을 때 어떤 FigureEntry의 region/caption에 들어가면 점프 대신 패널 프리뷰를 연다(R1과 동일 동작). 그 외 dest는 원래 동작. annotation 링크와 우리 regex 링크가 같은 텍스트에 겹치면 annotation을 우선하고 regex 주입을 생략한다.
+- 점프 정렬: 텍스트 목적지(목차·메모·언급 칩)는 뷰포트 상단 1/8 지점에 맞추고 앰버 밴드로 1.2초 플래시한다. 피규어 region 목적지는 세로 중앙에 맞추되, region 높이가 뷰포트의 3/4보다 크면 상단 1/8 정렬로 폴백하고 region 외곽선/필 플래시를 사용한다.
 
 ### 5.5 프리뷰 렌더 (`core/render-region.ts`)
 
@@ -263,7 +264,7 @@ renderRegion(pdfDoc, page, rectPdf, maxCssWidth): HTMLCanvasElement
 
 상태 머신: `idle → armed(figId) → dragging → preview → idle`
 
-- 진입: 그림·표 탭 상세의 버튼 — region 있으면 "영역 다시 지정", 없으면 "영역 지정". 진입 시 대상 페이지로 스크롤(기존 region 또는 캡션 위치).
+- 진입: 그림·표 카드 이미지 우상단 호버 크롭 아이콘(⌗). 진입 시 대상 페이지로 스크롤(기존 region 또는 캡션 위치).
 - armed: 각 pageDiv에 `div.mgn-crop-overlay`(absolute inset 0, crosshair, z-index 텍스트 레이어 위) 삽입, 뷰어에 `user-select:none`. 기존 region은 파란 외곽선 rect로 표시. 패널에는 안내 카드("드래그해서 영역을 지정하세요 · Esc 취소")가 뜬다.
 - dragging: mousedown한 페이지로 클램프, 러버밴드 rect 표시.
 - preview: mouseup 시 rect 확정 표시 유지, **패널 카드가 라이브 미리보기(renderRegion) + [저장] [다시 지정] [취소]로 전환**. 커서 근처에는 아무것도 띄우지 않는다(R8).
@@ -285,7 +286,7 @@ renderRegion(pdfDoc, page, rectPdf, maxCssWidth): HTMLCanvasElement
 
 - 공통: 탭 [목차 | 그림·표 | 메모(n)], 핀·닫기(R5), 닫힘 시 우측 26px 스트립. 패널 폭 312px(뷰포트 900px 미만이면 264px).
 - 목차 탭: `pdfDocument.getOutline()` 사용. 항목 클릭 → `getDestination`/`getPageIndex`로 해석해 점프. 스크롤 스파이는 outline 항목의 대상 페이지·y를 기준으로 현재 위치 표시. **outline이 없으면 탭에 "이 PDF에는 목차가 없어요"만 표시**(헤딩 휴리스틱 생성은 phase 2).
-- 그림·표 탭: 상세(라벨 + p.N 칩 + 프리뷰 캔버스 + 캡션 + [원문 위치로 이동] [메모 달기] **[영역 지정/다시 지정]** + confidence 낮으면 "영역 확인 필요" 배지) → "본문 언급 N" 목록(R7) → "이 문서의 그림·표" 전체 목록(활성 행 표시, 클릭 시 프리뷰 전환).
+- 그림·표 탭: 카드(프리뷰 이미지 + 우상단 호버 크롭 아이콘 + 라벨/p.N 칩 + 캡션) → "본문 언급 N" 칩 목록(R7). 프리뷰 이미지/라벨 클릭은 원문 region으로 이동하고, 크롭 저장 후에는 카드 이미지와 region 점프가 manual 영역을 즉시 반영한다.
 - 메모 탭: 데모와 동일 — 작성 카드(자동 인용/색 반영/[[·#] 힌트/닫기·저장·삭제), 형광펜 4색 선택(현재 펜 = 조용한 저장에도 적용), 검색, 카드 목록(인용 1줄 + 리치 텍스트 + p.N/링크 n/날짜 + 편집·삭제, 본문 점프). 검색은 단순 includes.
 - 허브(hub.html): 상단(제목·총계·검색) + 태그 칩 + **문서별 그룹**(storage의 모든 doc, `DocMeta.title`, "PDF 열기" = url 있으면 딥링크, 없으면 파일 재선택 흐름) + 카드 펼침(연결 [[링크]], [PDF에서 이 위치 열기], 삭제) + "링크된 노트" 스텁 섹션(역참조 목록, "문서에서 보기" 딥링크). 데모 대비 추가: 다중 문서 그룹, 문서 삭제(문서의 모든 데이터 제거, confirm 1회).
 

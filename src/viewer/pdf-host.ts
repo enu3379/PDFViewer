@@ -32,6 +32,13 @@ export type FlatOutlineItem = {
   page: number | null;
 };
 
+export type ResolvedPdfDestination = {
+  pageNumber: number;
+  destArray: unknown[];
+  xPdf?: number;
+  yPdf?: number;
+};
+
 type PdfHostElements = {
   container: HTMLDivElement;
   viewer: HTMLDivElement;
@@ -40,7 +47,26 @@ type PdfHostElements = {
 type PdfHostCallbacks = {
   onPageChange?: (page: number, pageCount: number) => void;
   onScaleChange?: (scale: number, presetValue?: string) => void;
+  onInternalDestination?: (destination: ResolvedPdfDestination) => boolean;
 };
+
+class MarginLinkService extends PDFLinkService {
+  #onInternalDestination?: (destination: ResolvedPdfDestination) => boolean;
+
+  constructor(
+    options: ConstructorParameters<typeof PDFLinkService>[0],
+    onInternalDestination?: (destination: ResolvedPdfDestination) => boolean
+  ) {
+    super(options);
+    this.#onInternalDestination = onInternalDestination;
+  }
+
+  override async goToDestination(dest: string | unknown[]): Promise<void> {
+    const resolved = await resolvePdfDestination(this.pdfDocument as PDFDocumentProxy | null, dest);
+    if (resolved && this.#onInternalDestination?.(resolved)) return;
+    await super.goToDestination(dest);
+  }
+}
 
 export class PdfHost {
   readonly eventBus: EventBus;
@@ -54,11 +80,14 @@ export class PdfHost {
   constructor(elements: PdfHostElements, callbacks: PdfHostCallbacks = {}) {
     this.#callbacks = callbacks;
     this.eventBus = new EventBus();
-    this.linkService = new PDFLinkService({
-      eventBus: this.eventBus,
-      externalLinkTarget: LinkTarget.BLANK,
-      ignoreDestinationZoom: true
-    });
+    this.linkService = new MarginLinkService(
+      {
+        eventBus: this.eventBus,
+        externalLinkTarget: LinkTarget.BLANK,
+        ignoreDestinationZoom: true
+      },
+      callbacks.onInternalDestination
+    );
     this.viewer = new PDFViewer({
       container: elements.container,
       viewer: elements.viewer,
@@ -241,6 +270,10 @@ export class PdfHost {
     }
   }
 
+  async resolveDestination(dest: string | unknown[]): Promise<ResolvedPdfDestination | null> {
+    return resolvePdfDestination(this.#doc, dest);
+  }
+
   #setDocument(doc: PDFDocumentProxy, url?: string): void {
     this.#doc = doc;
     const linkService = this.linkService as PDFLinkService & {
@@ -253,18 +286,7 @@ export class PdfHost {
 
   async #resolveDestPage(dest: string | unknown[] | null): Promise<number | null> {
     if (!this.#doc || !dest) return null;
-    try {
-      const destArray = typeof dest === 'string' ? await this.#doc.getDestination(dest) : dest;
-      if (!destArray?.length) return null;
-      const first = destArray[0];
-      if (typeof first === 'number') return first + 1;
-      if (first && typeof first === 'object' && 'num' in first && 'gen' in first) {
-        return (await this.#doc.getPageIndex(first as { num: number; gen: number })) + 1;
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    return (await resolvePdfDestination(this.#doc, dest))?.pageNumber ?? null;
   }
 
   #emitPageChange(): void {
@@ -274,4 +296,67 @@ export class PdfHost {
   #emitScaleChange(presetValue?: string): void {
     this.#callbacks.onScaleChange?.(this.viewer.currentScale, presetValue);
   }
+}
+
+export async function resolvePdfDestination(
+  pdfDocument: PDFDocumentProxy | null,
+  dest: string | unknown[]
+): Promise<ResolvedPdfDestination | null> {
+  if (!pdfDocument) return null;
+  try {
+    const destArray = typeof dest === 'string' ? await pdfDocument.getDestination(dest) : await dest;
+    if (!Array.isArray(destArray) || !destArray.length) return null;
+
+    const destRef = destArray[0];
+    let pageNumber: number | null = null;
+    if (typeof destRef === 'number' && Number.isInteger(destRef)) {
+      pageNumber = destRef + 1;
+    } else if (destRef && typeof destRef === 'object') {
+      const cachedPageNumber = (pdfDocument as PDFDocumentProxy & {
+        cachedPageNumber?: (ref: unknown) => number | null;
+      }).cachedPageNumber?.(destRef);
+      pageNumber = cachedPageNumber ?? (await pdfDocument.getPageIndex(destRef as { num: number; gen: number })) + 1;
+    }
+    if (!pageNumber || pageNumber < 1 || pageNumber > pdfDocument.numPages) return null;
+
+    return {
+      pageNumber,
+      destArray,
+      ...destinationCoordinates(destArray)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function destinationCoordinates(destArray: unknown[]): Pick<ResolvedPdfDestination, 'xPdf' | 'yPdf'> {
+  const mode = destinationMode(destArray[1]);
+  if (mode === 'XYZ') {
+    return {
+      xPdf: numberOrUndefined(destArray[2]),
+      yPdf: numberOrUndefined(destArray[3])
+    };
+  }
+  if (mode === 'FitH' || mode === 'FitBH') {
+    return { yPdf: numberOrUndefined(destArray[2]) };
+  }
+  if (mode === 'FitR') {
+    return {
+      xPdf: numberOrUndefined(destArray[2]),
+      yPdf: numberOrUndefined(destArray[5])
+    };
+  }
+  return {};
+}
+
+function destinationMode(value: unknown): string {
+  if (typeof value === 'string') return value.replace(/^\//, '');
+  if (value && typeof value === 'object' && 'name' in value) {
+    return String((value as { name: unknown }).name).replace(/^\//, '');
+  }
+  return '';
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }

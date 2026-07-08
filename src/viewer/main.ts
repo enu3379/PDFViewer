@@ -1,7 +1,7 @@
 import 'pdfjs-dist/web/pdf_viewer.css';
 import './viewer.css';
 import { createAnchorFromRange, repairAnchor } from '../core/anchor';
-import { parseLinks, parseTags } from '../core/format';
+import { escapeHtml, parseLinks, parseTags } from '../core/format';
 import { parseViewableUrl } from '../core/pdf-url';
 import {
   DEFAULT_PEN_THEME,
@@ -179,25 +179,6 @@ function markTocForPage(page: number): void {
   for (const row of tocList.querySelectorAll<HTMLButtonElement>('.toc-row')) {
     row.classList.toggle('on', row.dataset.id === active?.id);
   }
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
-    switch (char) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      case "'":
-        return '&#39;';
-      default:
-        return char;
-    }
-  });
 }
 
 async function loadUrl(file: string): Promise<void> {

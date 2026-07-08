@@ -1,6 +1,6 @@
 # Progress Log
 
-Last updated: 2026-07-07
+Last updated: 2026-07-08
 
 ## Current State
 
@@ -31,6 +31,15 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
   - `core/pen-theme.ts`(테마 목록·라벨·슬롯 이름·순환) + 유닛 테스트, 메모 탭 펜 줄의 팔레트 토글 버튼, `margin:settings.penTheme` 저장.
   - `MarginStore.loadSettings/updateSettings` 추가(병합 저장), sw.ts 자동 열기 토글이 settings를 통째로 덮어쓰던 문제 수정.
 - 메모 작성 카드 Enter 저장 (2026-07-08): Enter = 저장(Esc 취소와 대칭), Shift+Enter = 줄바꿈, 한글 IME 조합 확정 Enter는 `isComposing` 가드로 무시. 저장 로직은 버튼과 공용(`#saveCompose`). 작성 카드 힌트 문구에 키 안내 추가.
+- 이슈 #1 open UX 구현 (2026-07-08): C1-C8 코드/문서 반영.
+  - 액션 클릭 라우팅 개편: 빈 새탭은 빈 뷰어로 전환, 비PDF http(s)는 제자리 토스트, 주입 불가 페이지는 OS 알림, PDF형 URL은 현재 탭에서 뷰어 전환, 확장 페이지는 no-op.
+  - 뱃지 폴백 제거, content-type 판별을 GET+헤더 수신 후 abort 방식으로 변경.
+  - DNR 규칙 3 추가: `^file://.*\.pdf$` 로컬 PDF 자동 리다이렉트, 규칙 2 case-insensitive 처리.
+  - 파일 접근 OFF용 `webNavigation.onBeforeNavigate` 폴백 추가, 자동 열기 토글 OFF 시 무개입.
+  - 컨텍스트 메뉴 `auto-open` 체크 상태를 저장값과 동기화하고, 설정 병합 저장으로 펜 테마 보존.
+  - 뷰어에 로컬 파일 권한 안내 상태와 파일 없음 상태 추가. 권한 설정 버튼은 현재 탭을 `chrome://extensions/?id=<id>`로 전환하고, 실패 시 URL 텍스트를 노출.
+  - manifest 권한 갱신: `declarativeNetRequestWithHostAccess`, `webNavigation`, `notifications`, `file:///*`.
+  - URL 판별 헬퍼/테스트와 implementation-plan/windows-local-loading 문서 갱신.
 
 ## Needs QA
 
@@ -44,9 +53,20 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
 - Click the extension action on a non-PDF webpage and confirm the current tab stays put with an unsupported-document notice.
 - Reload the unpacked extension and confirm the new icon shows in the toolbar and `chrome://extensions`, and the restyled viewer (ghost toolbar, amber tab dot, boxless empty state) renders on a real arXiv PDF.
 - Switch the pen palette to 소다, confirm existing highlights/dots/selection recolor, reload the tab and confirm the theme persists, then toggle 자동 열기 in the action context menu and confirm the theme setting survives (merge-write fix).
+- Issue #1 manual QA:
+  - 빈 새탭 아이콘 클릭, 일반 https 비PDF 토스트, chrome://settings OS 알림, 뷰어 탭 no-op.
+  - autoIntercept ON/OFF에서 arXiv, `.pdf`, `.PDF`, 로컬 file PDF, Windows UNC 경로 동작.
+  - 파일 접근 OFF에서 로컬 PDF가 권한 안내 상태로 도착하고 "권한 설정 열기"가 현재 탭을 확장 세부정보로 전환하는지 확인.
+  - 파일 접근 ON에서 로컬 PDF가 DNR로 무플래시 전환되는지, OFF 폴백의 내장 뷰어 플래시가 수용 가능한지 확인.
+  - Chrome 종료 상태에서 PDF 더블클릭 콜드 스타트 DNR 영속성 확인.
+  - 파일 접근 토글 변경 시 열린 뷰어 탭 최종 상태 확인.
+  - 존재하지 않는 로컬 경로(이동/개명된 파일)가 파일 없음 상태로 도착하는지 확인.
+  - (macOS) 시스템 설정에서 Chrome 알림 OFF 시 OS 알림이 조용히 누락되는 알려진 한계 확인.
+  - 다운로드 항목 "시스템 뷰어로 열기"는 Margin 미개입이 정상임을 확인.
 
 ## Next
 
+- 이슈 #1 대응: C1–C8 + 리뷰 후속 R1–R3 반영 완료 (`dev/issue-1-open-ux` 브랜치) — macOS + Windows 수동 Chrome QA 필요.
 - Finish M2 manual QA fixes.
 - Keep figure/table extraction out of the immediate path until the separate figure feature direction is decided.
 - After M2 acceptance, move to either Hub work or the separate figure workflow, depending on priority.

@@ -63,6 +63,24 @@
           <h1>PDF를 열 수 없습니다</h1>
           <p id="errorMessage"></p>
         </section>
+        <section id="fileAccessState" class="empty-state file-access-state" hidden>
+          <h1>로컬 파일을 읽을 권한이 꺼져 있어요</h1>
+          <p>크롬은 확장 프로그램의 로컬 파일 접근을 기본으로 막아 둡니다. 확장 세부정보에서 「파일 URL에 대한 액세스 허용」(영어 UI: "Allow access to file URLs")을 켜 주세요. 켜는 순간 확장이 다시 시작되어 이 탭이 닫힐 수 있어요 — 그 후 PDF를 다시 열면 자동으로 Margin에서 열립니다.</p>
+          <div class="state-actions">
+            <button id="fileAccessSettings" class="file-button" type="button">권한 설정 열기</button>
+            <button id="fileAccessPickFile" class="secondary-button" type="button">파일 다시 선택</button>
+          </div>
+          <p class="hint">지금은 PDF 파일을 이 창에 끌어다 놓아도 열 수 있어요.</p>
+          <p id="fileAccessSettingsFallback" class="copy-url" hidden></p>
+        </section>
+        <section id="missingFileState" class="empty-state error-state" hidden>
+          <h1>파일을 찾을 수 없어요</h1>
+          <p>파일이 이동되었거나 이름이 바뀌었을 수 있어요. 다시 선택하거나 이 창에 끌어다 놓아 주세요.</p>
+          <p id="missingFileUrl" class="copy-url"></p>
+          <div class="state-actions">
+            <button id="missingFilePickFile" class="file-button" type="button">파일 다시 선택</button>
+          </div>
+        </section>
         <section id="readRow" class="read-row" hidden>
           <div id="viewerContainer" class="pdf-scroll" tabindex="0">
             <div id="viewer" class="pdfViewer"></div>

@@ -2,7 +2,7 @@ import 'pdfjs-dist/web/pdf_viewer.css';
 import './viewer.css';
 import { createAnchorFromRange, repairAnchor } from '../core/anchor';
 import { escapeHtml, parseLinks, parseTags } from '../core/format';
-import { parseViewableUrl } from '../core/pdf-url';
+import { isFileUrl, parseViewableUrl } from '../core/pdf-url';
 import {
   DEFAULT_PEN_THEME,
   isPenTheme,
@@ -61,6 +61,31 @@ function runtimeUrl(path: string): string {
   return path;
 }
 
+function isFileSchemeUrl(raw: string): boolean {
+  const url = parseViewableUrl(raw);
+  return Boolean(url && isFileUrl(url));
+}
+
+function fileAccessSettingsUrl(): string {
+  const extensionId = typeof chrome !== 'undefined' ? chrome.runtime?.id : '';
+  return `chrome://extensions/?id=${extensionId}`;
+}
+
+async function canReadFileSchemeUrls(): Promise<boolean> {
+  if (typeof chrome === 'undefined' || !chrome.extension?.isAllowedFileSchemeAccess) return true;
+  try {
+    return await chrome.extension.isAllowedFileSchemeAccess();
+  } catch {
+    return false;
+  }
+}
+
+// PDF.js 예외는 Error 서브클래스가 아닐 수 있어 name 필드로 구분한다.
+function isMissingPdfError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { name?: unknown }).name === 'MissingPDFException';
+}
+
 function requireElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
   if (!element) throw new Error(`Missing required element: ${selector}`);
@@ -68,7 +93,7 @@ function requireElement<T extends Element>(selector: string): T {
 }
 
 function showOnly(section: HTMLElement | null): void {
-  for (const el of [emptyState, pendingState, errorState, readRow]) {
+  for (const el of [emptyState, pendingState, errorState, fileAccessState, missingFileState, readRow]) {
     el?.setAttribute('hidden', '');
   }
   section?.removeAttribute('hidden');
@@ -83,6 +108,32 @@ function setError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   if (errorMessage) errorMessage.textContent = message;
   showOnly(errorState);
+}
+
+function showFileAccessState(): void {
+  fileAccessSettingsFallback.hidden = true;
+  fileAccessSettingsFallback.textContent = '';
+  showOnly(fileAccessState);
+}
+
+function showMissingFileState(file: string): void {
+  missingFileUrl.textContent = file;
+  showOnly(missingFileState);
+}
+
+async function openFileAccessSettings(): Promise<void> {
+  const url = fileAccessSettingsUrl();
+  try {
+    await chrome.tabs.update({ url });
+  } catch {
+    fileAccessSettingsFallback.textContent = url;
+    fileAccessSettingsFallback.hidden = false;
+  }
+}
+
+function openFilePicker(): void {
+  fileInput.value = '';
+  fileInput.click();
 }
 
 function flashElement(el: HTMLElement): void {
@@ -184,6 +235,11 @@ function markTocForPage(page: number): void {
 async function loadUrl(file: string): Promise<void> {
   setLoading(file);
   if (fileLabel) fileLabel.textContent = basenameFromUrl(file);
+  const isLocalFile = isFileSchemeUrl(file);
+  if (isLocalFile && !(await canReadFileSchemeUrls())) {
+    showFileAccessState();
+    return;
+  }
   try {
     await host.loadUrl(file);
     await initializeDoc(basenameFromUrl(file), file);
@@ -193,6 +249,10 @@ async function loadUrl(file: string): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    if (isLocalFile && isMissingPdfError(error)) {
+      showMissingFileState(file);
+      return;
+    }
     setError(error);
   }
 }
@@ -578,10 +638,17 @@ function setupPanelResize(): void {
 const emptyState = requireElement<HTMLElement>('#emptyState');
 const pendingState = requireElement<HTMLElement>('#pendingState');
 const errorState = requireElement<HTMLElement>('#errorState');
+const fileAccessState = requireElement<HTMLElement>('#fileAccessState');
+const missingFileState = requireElement<HTMLElement>('#missingFileState');
 const readRow = requireElement<HTMLElement>('#readRow');
 const fileLabel = requireElement<HTMLElement>('#fileLabel');
 const pendingUrl = requireElement<HTMLElement>('#pendingUrl');
 const errorMessage = requireElement<HTMLElement>('#errorMessage');
+const fileAccessSettings = requireElement<HTMLButtonElement>('#fileAccessSettings');
+const fileAccessPickFile = requireElement<HTMLButtonElement>('#fileAccessPickFile');
+const fileAccessSettingsFallback = requireElement<HTMLElement>('#fileAccessSettingsFallback');
+const missingFilePickFile = requireElement<HTMLButtonElement>('#missingFilePickFile');
+const missingFileUrl = requireElement<HTMLElement>('#missingFileUrl');
 const hubButton = requireElement<HTMLButtonElement>('#hubButton');
 const fileInput = requireElement<HTMLInputElement>('#fileInput');
 const viewerContainer = requireElement<HTMLDivElement>('#viewerContainer');
@@ -712,6 +779,13 @@ host.eventBus.on('pagerendered', (event: { pageNumber: number }) => {
 hubButton.addEventListener('click', () => {
   location.href = runtimeUrl('hub.html');
 });
+
+fileAccessSettings.addEventListener('click', () => {
+  void openFileAccessSettings();
+});
+
+fileAccessPickFile.addEventListener('click', openFilePicker);
+missingFilePickFile.addEventListener('click', openFilePicker);
 
 fileInput.addEventListener('change', () => {
   const [file] = Array.from(fileInput.files ?? []);

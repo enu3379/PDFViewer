@@ -3,6 +3,10 @@
 figure 감지 엔진(`src/core/fig-extract.js`)의 반입·사용 규약. 엔진 알고리즘은 별도
 저장소 **figure-preview-test**에서 개발·검증되며, 이 repo에는 빌드 산출물처럼 vendoring한다.
 
+엔진 repo 문서 (로컬 `C:\Users\kimde\Desktop\figure-preview-test`, 원격 https://github.com/onetwothr1/PDFViewer-Figure-Extract):
+- `docs/DEV.md` — 엔진 개발 진입점 (통합 계약, 릴리스 절차, 로드맵)
+- `docs/ALGORITHM.md` — 감지 알고리즘 상세
+
 ## 작업 경계
 
 - **엔진(figure-preview-test) 담당**: 문서에 어떤 figure가 존재하는가(번호·페이지), region bbox(그림 영역만),
@@ -46,6 +50,9 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 
 ## 주의사항
 
+> 이 섹션의 원천 사실은 엔진 repo 문서(`docs/DEV.md` §통합 계약, `docs/ALGORITHM.md` §알려진 한계)가 정본 —
+> 벤더링 시 새 버전과 어긋나지 않는지 동기화 확인.
+
 - **좌표계**: 엔진은 pt 단위·좌상단 원점. Margin 저장 규약(PDF user space, 좌하단 원점)으로는
   `toPdfRect()`가 변환한다 (`y' = pageHeight − y`).
 - **pdf.js 버전**: 엔진은 pdfjs-dist 4.10.38(프로젝트 고정 버전) 기준으로 테스트 샘플 검증됨.
@@ -57,7 +64,11 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 
 ## fig extractor 작업자를 위한 갱신 절차
 
-1. 엔진 전용 별도 repo에서 새 버전 검증 완료 후
-2. `fig-extract.js`를 `src/core/`에 그대로 복사 (파일 하단의 globalThis 노출 2줄 유지)
-3. `npm run typecheck && npm run build` 확인
-4. 커밋 메시지에 엔진 버전 명시 (예: `chore: bump fig-extract to v2.3.0`)
+1. 엔진 전용 별도 repo에서 새 버전 검증 완료 후 (엔진 repo `docs/DEV.md` §버전 릴리스 절차)
+2. `fig-extract.js`를 `src/core/`에 **그대로 복사** — v2.3.0부터 엔진 파일에 globalThis 노출이 포함되어
+   byte-identical 복사면 됨. 복사 후 두 파일 diff가 0건인지 확인
+3. 엔진 헤더 체인지로그의 계약 태그 확인 — `[필드 추가]`/`[BREAKING]`이면
+   `fig-engine.ts`·`fig-extract.d.ts` 타입과 이 문서의 계약 서술을 함께 갱신
+4. 이 문서 §주의사항이 새 버전과 어긋나지 않는지 확인 (예: confidence 실측화 시 해당 항목 갱신)
+5. `npm run typecheck && npm run build` 확인 후 그림·표 탭에서 샘플 PDF 1개 스모크 테스트
+6. 커밋 메시지에 엔진 버전 명시 (예: `chore: bump fig-extract to v2.3.0`)

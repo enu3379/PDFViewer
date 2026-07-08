@@ -24,7 +24,6 @@ export interface EngineBox {
 export interface EngineFigure {
   num: string;                  // "1", "3.1", "A.1", "IV" …
   page: number;                 // 1-based
-  method: "image" | "pixel";    // 감지 경로 (이미지 XObject 좌표 / 픽셀 블록 분석)
   confidence: number;           // 현재 1.0 고정
   caption: string;              // 캡션 전체 텍스트 (여러 줄 병합)
   bboxPt: EngineBox;            // 그림 영역만 — 캡션 제외

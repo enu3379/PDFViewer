@@ -1,26 +1,34 @@
 /*
  * fig-extract.js — 논문 PDF에서 figure 영역을 자동 감지·크롭하는 엔진
  *
- * ⚠ VENDORED FILE — 이 repo에서 직접 수정 금지.
- *   원본 저장소: figure-preview-test (알고리즘 담당). 갱신 절차는 docs/fig-extract-integration.md 참고.
+ * ⚠ 이 파일은 PDFViewer(Margin) repo의 src/core/fig-extract.js 로 그대로 복사(vendoring)된다.
+ *   알고리즘 수정은 figure-preview-test repo에서만 한다.
+ *   릴리스 절차: figure-preview-test/docs/DEV.md §버전 릴리스 절차
+ *   벤더링 절차: PDFViewer/docs/fig-extract-integration.md §갱신 절차
  *
  * 의존성: pdf.js (전역 pdfjsLib). 브라우저 전용 (canvas 사용).
  * 사용법:
  *   const result = await FigExtract.extract(uint8Array, {
  *     onProgress: msg => {},   // 진행 상태 문자열
  *     debug: msg => {},        // 상세 진단 로그 (선택)
+ *     maxPages: 60,            // 선택
+ *     pdfDocument: doc,        // 선택 — 이미 로드된 PDFDocumentProxy 재사용 (지정 시 data는 null 가능)
  *     renderPage: async (pageNum, scale) => canvas,  // 선택 — 호스트 렌더 캐시 주입
  *   });
  *   // result = { title, numPages, engineVersion, figures: [...] }
- *   // figure = { num, page, method, confidence, caption, bboxPt(그림만), captionBoxPt, bboxPx, canvas }
+ *   // figure = { num, page, confidence, caption, bboxPt(그림만), captionBoxPt, bboxPx, canvas }
  *   // 크롭 이미지: FigExtract.cropDataURL(fig) / FigExtract.cropBlob(fig)
  *   // 좌표: pt, 좌상단 원점. PDF user space 변환은 y' = pageHeight - y
+ *
+ * 알고리즘 설명과 각 규칙의 유래는 docs/ALGORITHM.md 참고.
  */
 "use strict";
 
 const FigExtract = (() => {
 
-const VERSION = "2.2.1";
+const VERSION = "2.3.0";
+// 2.3.0: [BREAKING] method 필드 제거 — 감지 경로가 아니라 "영역이 래스터 이미지와 겹치는지"의
+//        사후 라벨이었음. 중복 번호 dedup 내부용으로만 유지. 헤더 정리·globalThis 노출 포함. bbox 로직 무변경
 // 2.2.1: opts.pdfDocument 지원 — 호스트(Margin 뷰어)가 이미 로드한 PDFDocumentProxy 재사용 (재파싱 방지)
 // 2.2.0: region(그림만)/캡션(텍스트) 분리 출력, confidence 추가(현재 1.0 고정), renderPage 주입 지원
 // 2.1.1: pdf.js 3.11.174 → 4.10.38 (Margin과 버전 일치). 알고리즘 무변경
@@ -326,7 +334,8 @@ function detectPage(pg, lines, dom, grid, dbg) {
 
     if (incl.length) {
       const ry0 = incl[incl.length - 1][0], ry1 = incl[0][1];
-      const method = incl.some(([a, b]) => hasImage(a, b)) ? "image" : "pixel";
+      /* 영역이 래스터 이미지(XObject)와 겹치는지 — 중복 번호 dedup에서 우선순위로만 사용 */
+      const raster = incl.some(([a, b]) => hasImage(a, b));
       /* 4) 좌우 잉크 연결 확장 (본문 줄/다른 캡션 구간 진입 금지) */
       const rowsHasInk = x => {
         for (let yy = ry0; yy <= ry1; yy += 2) if (inkAt(grid, x, yy)) return true;
@@ -377,9 +386,9 @@ function detectPage(pg, lines, dom, grid, dbg) {
       if (fx0 > fx1) { fx0 = nrx0; fx1 = nrx1; }
       fx0 = Math.min(fx0, Math.round(capbox.left * S));
       fx1 = Math.max(fx1, Math.round((capbox.left + capbox.w) * S));
-      dbg(`  Fig${num}: REGION y[${ry0}-${ry1}] x[${fx0}-${fx1}] ${method}`);
+      dbg(`  Fig${num}: REGION y[${ry0}-${ry1}] x[${fx0}-${fx1}]${raster ? " raster" : ""}`);
       /* region은 그림 영역만 (캡션 제외). 캡션은 captionBox/caption 텍스트로 별도 반환 */
-      figs.push({ num, method, page: pg.num,
+      figs.push({ num, raster_: raster, page: pg.num,
         x0: fx0 - 10, x1: fx1 + 10, y0: ry0 - 8, y1: ry1 + 4,
         h_: Math.round(capBottom * S) - ry0, caption: capText, captionBox });
     } else {
@@ -391,7 +400,7 @@ function detectPage(pg, lines, dom, grid, dbg) {
         const yb = Math.max(...below.map(im => im.top + im.h));
         const bx0 = Math.min(x0, ...below.map(im => im.left));
         const bx1 = Math.max(x1, ...below.map(im => im.left + im.w));
-        figs.push({ num, method: "image", page: pg.num,
+        figs.push({ num, raster_: true, page: pg.num,
           x0: Math.round(bx0*S) - 10, x1: Math.round(bx1*S) + 10,
           y0: Math.round(capBottom*S) + 2, y1: Math.round(yb*S) + 4,
           h_: Math.round((yb - cap.top)*S), caption: capText, captionBox });
@@ -451,7 +460,7 @@ async function extract(data, opts = {}) {
   /* 중복 번호는 더 그럴듯한 후보 선택 */
   const best = {};
   for (const f of allFigs) {
-    const score = (f.method === "image" ? 1e9 : 0) + f.h_;
+    const score = (f.raster_ ? 1e9 : 0) + f.h_;
     if (!(f.num in best) || score > best[f.num].score) best[f.num] = { score, f };
   }
   const figures = Object.values(best).map(v => v.f)
@@ -464,6 +473,7 @@ async function extract(data, opts = {}) {
     f.captionBoxPt = { x0: +f.captionBox.x0.toFixed(1), y0: +f.captionBox.y0.toFixed(1),
                        x1: +f.captionBox.x1.toFixed(1), y1: +f.captionBox.y1.toFixed(1) };
     delete f.captionBox;
+    delete f.raster_;
     f.confidence = 1.0; // 당분간 고정 (Margin FigureEntry.confidence 대응)
   }
   return { title, numPages: pdf.numPages, figures, engineVersion: VERSION };

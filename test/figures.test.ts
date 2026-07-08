@@ -32,6 +32,22 @@ describe('figure helpers', () => {
     expect(anchor).toEqual({ page: 3, start: 0, end: 30 });
   });
 
+  // 회귀: 스캔 텍스트는 pdf.js 아이템을 구분자 없이 이어 붙여 단어가 붙을 수 있다
+  // (arXiv 2606.12848 p.15 실측 — "threereviewers"). 공백이 빠져도 앵커를 찾아야
+  // 캡션 라벨이 본문 언급으로 새지 않는다.
+  it('finds caption anchors when the page text drops inter-item spaces', () => {
+    const pageText = 'defects in a given output.Figure 2: Evaluation framework for HLER outputs. '
+      + 'Each generated output is independently graded by threereviewers on feasibility.';
+    const caption = 'Figure 2: Evaluation framework for HLER outputs. '
+      + 'Each generated output is independently graded by three reviewers on feasibility.';
+
+    const anchor = findCaptionAnchor(15, pageText, caption);
+
+    expect(anchor).toBeDefined();
+    expect(pageText.slice(anchor!.start, anchor!.start + 8)).toBe('Figure 2');
+    expect(pageText.slice(anchor!.start, anchor!.end)).toContain('threereviewers');
+  });
+
   it('preserves manual regions when engine results are merged', () => {
     const existing = figure({
       region: { page: 2, rect: [1, 2, 3, 4] },

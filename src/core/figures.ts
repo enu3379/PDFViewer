@@ -59,30 +59,17 @@ function naturalNumberCompare(left: string, right: string): number {
   return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
 }
 
+// 스캔 텍스트는 pdf.js 아이템을 구분자 없이 이어 붙여 공백 유무가 불안정하다
+// (예: "threereviewers"). 엔진 캡션과의 대조는 공백을 아예 무시하고 한다.
 function normalizeSearchText(value: string): NormalizedText {
   const chars: string[] = [];
   const map: number[] = [];
-  let lastWasSpace = false;
 
   for (let index = 0; index < value.length; index += 1) {
     const char = value[index];
-    if (/\s/.test(char)) {
-      if (!lastWasSpace && chars.length > 0) {
-        chars.push(' ');
-        map.push(index);
-        lastWasSpace = true;
-      }
-      continue;
-    }
-
+    if (/\s/.test(char)) continue;
     chars.push(char.toLocaleLowerCase());
     map.push(index);
-    lastWasSpace = false;
-  }
-
-  if (chars.at(-1) === ' ') {
-    chars.pop();
-    map.pop();
   }
 
   return { text: chars.join(''), map };

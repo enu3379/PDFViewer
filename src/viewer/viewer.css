@@ -347,19 +347,23 @@ textarea {
   animation: mflash 1.4s ease;
 }
 
+/* 텍스트 레이어 글자는 캔버스 글리프 위의 투명 사본 — 색을 입히면 이중 인쇄처럼 겹쳐 보인다.
+   링크 표시는 글자색 대신 점선 밑줄 + 반투명 배경으로만 한다. */
 .mgn-ref {
-  border-bottom: 1px dotted var(--blue);
-  color: var(--blue);
+  border-bottom: 1.5px dotted rgb(24 95 165 / .8);
+  color: transparent;
   cursor: pointer;
   pointer-events: auto;
   text-decoration: none;
 }
 
 .mgn-ref:hover,
-.mgn-ref:focus-visible,
+.mgn-ref:focus-visible {
+  background: rgb(24 95 165 / .12);
+}
+
 .mgn-ref.on {
-  background: var(--blue-soft);
-  color: var(--blue-deep);
+  background: rgb(24 95 165 / .18);
 }
 
 .mgn-jump-flash {

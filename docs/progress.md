@@ -53,7 +53,7 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
 - Click the extension action on a non-PDF webpage and confirm the current tab stays put with an unsupported-document notice.
 - Reload the unpacked extension and confirm the new icon shows in the toolbar and `chrome://extensions`, and the restyled viewer (ghost toolbar, amber tab dot, boxless empty state) renders on a real arXiv PDF.
 - Switch the pen palette to 소다, confirm existing highlights/dots/selection recolor, reload the tab and confirm the theme persists, then toggle 자동 열기 in the action context menu and confirm the theme setting survives (merge-write fix).
-- Issue #1 manual QA:
+- Issue #1 manual QA — 실행 가이드는 [issue-1-qa.md](issue-1-qa.md) (Windows/macOS 분리 체크리스트):
   - 빈 새탭 아이콘 클릭, 일반 https 비PDF 토스트, chrome://settings OS 알림, 뷰어 탭 no-op.
   - autoIntercept ON/OFF에서 arXiv, `.pdf`, `.PDF`, 로컬 file PDF, Windows UNC 경로 동작.
   - 파일 접근 OFF에서 로컬 PDF가 권한 안내 상태로 도착하고 "권한 설정 열기"가 현재 탭을 확장 세부정보로 전환하는지 확인.

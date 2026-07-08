@@ -1,50 +1,73 @@
-import { isHttpUrl, isPdfContentType, isPdfLikeUrl, parseViewableUrl } from './core/pdf-url';
+import {
+  isChromeNewTabUrl,
+  isHttpUrl,
+  isPdfContentType,
+  isPdfLikeUrl,
+  parseViewableUrl
+} from './core/pdf-url';
 
 const VIEWER_PATH = 'viewer.html';
 const HUB_PATH = 'hub.html';
 const SETTINGS_KEY = 'margin:settings';
-const ACTION_TITLE = 'Margin으로 열기';
 const UNSUPPORTED_NOTICE = 'Margin은 PDF 문서에서만 열 수 있어요. PDF 링크나 로컬 PDF 파일에서 다시 눌러 주세요.';
+const UNSUPPORTED_NOTIFICATION_TITLE = 'Margin';
+const UNSUPPORTED_NOTIFICATION_MESSAGE = 'PDF 문서에서만 열 수 있어요. PDF 탭에서 다시 눌러 주세요.';
+const ICON_128 = 'icons/icon-128.png';
 
 type Settings = {
   autoIntercept?: boolean;
 };
+
+type PdfResponseStatus = 'pdf' | 'not-pdf' | 'unknown';
 
 function viewerUrl(file?: string): string {
   const base = chrome.runtime.getURL(VIEWER_PATH);
   return file ? `${base}?file=${encodeURIComponent(file)}` : base;
 }
 
-async function urlRespondsAsPdf(url: string): Promise<boolean> {
+function ownExtensionUrl(): string {
+  return chrome.runtime.getURL('');
+}
+
+function tabUrl(tab: chrome.tabs.Tab): string | undefined {
+  const pendingUrl = (tab as chrome.tabs.Tab & { pendingUrl?: string }).pendingUrl;
+  return pendingUrl ?? tab.url;
+}
+
+function isOwnExtensionPage(rawUrl: string): boolean {
+  return rawUrl.startsWith(ownExtensionUrl());
+}
+
+async function detectPdfResponse(url: string): Promise<PdfResponseStatus> {
+  const controller = new AbortController();
   try {
     const response = await fetch(url, {
-      method: 'HEAD',
+      method: 'GET',
       credentials: 'include',
-      cache: 'no-store'
+      cache: 'no-store',
+      signal: controller.signal
     });
-    return isPdfContentType(response.headers.get('content-type')) || isPdfLikeUrl(response.url);
+    const contentType = response.headers.get('content-type');
+    if (isPdfContentType(contentType) || isPdfLikeUrl(response.url)) return 'pdf';
+    return contentType ? 'not-pdf' : 'unknown';
   } catch {
-    return false;
+    return 'unknown';
+  } finally {
+    controller.abort();
   }
 }
 
-async function canOpenInViewer(rawUrl: string): Promise<boolean> {
-  const url = parseViewableUrl(rawUrl);
-  if (!url) return false;
-  if (isPdfLikeUrl(rawUrl)) return true;
-  if (!isHttpUrl(url)) return false;
-  return urlRespondsAsPdf(rawUrl);
-}
-
-async function flashActionBadge(tabId: number): Promise<void> {
-  await chrome.action.setBadgeBackgroundColor({ tabId, color: '#9F2D20' });
-  await chrome.action.setBadgeText({ tabId, text: 'PDF' });
-  await chrome.action.setTitle({ tabId, title: UNSUPPORTED_NOTICE });
-  await new Promise((resolve) => {
-    setTimeout(resolve, 2400);
-  });
-  await chrome.action.setBadgeText({ tabId, text: '' });
-  await chrome.action.setTitle({ tabId, title: ACTION_TITLE });
+async function showUnsupportedNotification(): Promise<void> {
+  try {
+    await chrome.notifications.create({
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL(ICON_128),
+      title: UNSUPPORTED_NOTIFICATION_TITLE,
+      message: UNSUPPORTED_NOTIFICATION_MESSAGE
+    });
+  } catch {
+    // OS-level notifications may be unavailable or disabled; Chrome exposes no reliable visibility signal.
+  }
 }
 
 async function showUnsupportedNotice(tabId: number): Promise<void> {
@@ -80,7 +103,7 @@ async function showUnsupportedNotice(tabId: number): Promise<void> {
       }
     });
   } catch {
-    await flashActionBadge(tabId);
+    await showUnsupportedNotification();
   }
 }
 
@@ -94,7 +117,7 @@ async function syncInterceptRules(): Promise<void> {
   const auto = settings.autoIntercept ?? true;
   const viewer = chrome.runtime.getURL(VIEWER_PATH);
 
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1, 2] });
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1, 2, 3] });
   if (!auto) return;
 
   await chrome.declarativeNetRequest.updateDynamicRules({
@@ -116,6 +139,20 @@ async function syncInterceptRules(): Promise<void> {
         priority: 1,
         condition: {
           regexFilter: '^https?://.+\\.pdf([?#].*)?$',
+          isUrlFilterCaseSensitive: false,
+          resourceTypes: ['main_frame']
+        },
+        action: {
+          type: 'redirect',
+          redirect: { regexSubstitution: `${viewer}?file=\\0` }
+        }
+      },
+      {
+        id: 3,
+        priority: 1,
+        condition: {
+          regexFilter: '^file://.*\\.pdf$',
+          isUrlFilterCaseSensitive: false,
           resourceTypes: ['main_frame']
         },
         action: {
@@ -127,7 +164,17 @@ async function syncInterceptRules(): Promise<void> {
   });
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+async function syncAutoOpenMenuChecked(): Promise<void> {
+  const settings = await getSettings();
+  try {
+    await chrome.contextMenus.update('auto-open', { checked: settings.autoIntercept ?? true });
+  } catch {
+    // The menu can be absent during development reloads before onInstalled recreates it.
+  }
+}
+
+async function setupContextMenus(): Promise<void> {
+  await chrome.contextMenus.removeAll();
   chrome.contextMenus.create({
     id: 'open-hub',
     title: '메모 허브 열기',
@@ -136,14 +183,21 @@ chrome.runtime.onInstalled.addListener(async () => {
   chrome.contextMenus.create({
     id: 'auto-open',
     type: 'checkbox',
-    checked: true,
     title: 'PDF 자동으로 Margin에서 열기',
     contexts: ['action']
   });
+  await syncAutoOpenMenuChecked();
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
+  await setupContextMenus();
   await syncInterceptRules();
 });
 
-chrome.runtime.onStartup.addListener(syncInterceptRules);
+chrome.runtime.onStartup.addListener(() => {
+  void syncAutoOpenMenuChecked();
+  void syncInterceptRules();
+});
 
 chrome.contextMenus.onClicked.addListener(async (info) => {
   if (info.menuItemId === 'open-hub') {
@@ -158,14 +212,72 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
       [SETTINGS_KEY]: { ...settings, autoIntercept: Boolean(info.checked) }
     });
     await syncInterceptRules();
+    await syncAutoOpenMenuChecked();
   }
 });
 
+async function isAllowedFileSchemeAccess(): Promise<boolean> {
+  try {
+    return await chrome.extension.isAllowedFileSchemeAccess();
+  } catch {
+    return false;
+  }
+}
+
+async function handleLocalPdfNavigation(details: chrome.webNavigation.WebNavigationBaseCallbackDetails): Promise<void> {
+  if (details.frameId !== 0 || details.tabId < 0) return;
+  const settings = await getSettings();
+  if (settings.autoIntercept === false) return;
+  if (await isAllowedFileSchemeAccess()) return;
+  try {
+    await chrome.tabs.update(details.tabId, { url: viewerUrl(details.url) });
+  } catch {
+    // 판별을 기다리는 사이 탭이 닫혔거나 다른 곳으로 이동한 레이스 — 무시.
+  }
+}
+
+chrome.webNavigation.onBeforeNavigate.addListener(
+  (details) => {
+    void handleLocalPdfNavigation(details);
+  },
+  {
+    url: [
+      { urlPrefix: 'file://', pathSuffix: '.pdf' },
+      { urlPrefix: 'file://', pathSuffix: '.PDF' }
+    ]
+  }
+);
+
 chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab.id || !tab.url) return;
-  if (!(await canOpenInViewer(tab.url))) {
+  if (!tab.id) return;
+
+  const rawUrl = tabUrl(tab);
+  if (!rawUrl || isChromeNewTabUrl(rawUrl)) {
+    await chrome.tabs.update(tab.id, { url: viewerUrl() });
+    return;
+  }
+  if (isOwnExtensionPage(rawUrl)) return;
+
+  const url = parseViewableUrl(rawUrl);
+  if (!url) {
     await showUnsupportedNotice(tab.id);
     return;
   }
-  await chrome.tabs.update(tab.id, { url: viewerUrl(tab.url) });
+
+  if (isPdfLikeUrl(rawUrl)) {
+    await chrome.tabs.update(tab.id, { url: viewerUrl(rawUrl) });
+    return;
+  }
+
+  if (isHttpUrl(url)) {
+    const status = await detectPdfResponse(rawUrl);
+    if (status === 'not-pdf') {
+      await showUnsupportedNotice(tab.id);
+      return;
+    }
+    await chrome.tabs.update(tab.id, { url: viewerUrl(rawUrl) });
+    return;
+  }
+
+  await showUnsupportedNotice(tab.id);
 });

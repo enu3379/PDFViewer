@@ -54,6 +54,11 @@ function basenameFromUrl(value: string): string {
   }
 }
 
+function pdfDownloadName(base: string): string {
+  const cleaned = base.replace(/[\\/:*?"<>|]/g, '-').trim() || 'document';
+  return cleaned.toLowerCase().endsWith('.pdf') ? cleaned : `${cleaned}.pdf`;
+}
+
 function runtimeUrl(path: string): string {
   if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
     return chrome.runtime.getURL(path);
@@ -101,6 +106,7 @@ function showOnly(section: HTMLElement | null): void {
 
 function setLoading(label: string): void {
   if (pendingUrl) pendingUrl.textContent = label;
+  downloadButton.disabled = true;
   showOnly(pendingState);
 }
 
@@ -134,6 +140,22 @@ async function openFileAccessSettings(): Promise<void> {
 function openFilePicker(): void {
   fileInput.value = '';
   fileInput.click();
+}
+
+let downloadName = 'document.pdf';
+
+async function downloadCurrentPdf(): Promise<void> {
+  const doc = host.pdfDocument;
+  if (!doc || downloadButton.disabled) return;
+  const data = await doc.getData();
+  // getData()의 Uint8Array<ArrayBufferLike>는 BlobPart와 타입이 안 맞아 ArrayBuffer 사본으로 감싼다.
+  const blob = new Blob([new Uint8Array(data)], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = downloadName;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function flashElement(el: HTMLElement): void {
@@ -244,6 +266,8 @@ async function loadUrl(file: string): Promise<void> {
     await host.loadUrl(file);
     await initializeDoc(basenameFromUrl(file), file);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
+    downloadName = pdfDownloadName(basenameFromUrl(file));
+    downloadButton.disabled = false;
     showOnly(readRow);
     host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
@@ -264,6 +288,8 @@ async function loadSelectedFile(file: File): Promise<void> {
     await host.loadFile(file);
     await initializeDoc(file.name);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
+    downloadName = pdfDownloadName(file.name);
+    downloadButton.disabled = false;
     showOnly(readRow);
     host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
@@ -644,6 +670,7 @@ const readRow = requireElement<HTMLElement>('#readRow');
 const fileLabel = requireElement<HTMLElement>('#fileLabel');
 const pendingUrl = requireElement<HTMLElement>('#pendingUrl');
 const errorMessage = requireElement<HTMLElement>('#errorMessage');
+const downloadButton = requireElement<HTMLButtonElement>('#downloadButton');
 const fileAccessSettings = requireElement<HTMLButtonElement>('#fileAccessSettings');
 const fileAccessPickFile = requireElement<HTMLButtonElement>('#fileAccessPickFile');
 const fileAccessSettingsFallback = requireElement<HTMLElement>('#fileAccessSettingsFallback');
@@ -780,6 +807,10 @@ hubButton.addEventListener('click', () => {
   location.href = runtimeUrl('hub.html');
 });
 
+downloadButton.addEventListener('click', () => {
+  void downloadCurrentPdf();
+});
+
 fileAccessSettings.addEventListener('click', () => {
   void openFileAccessSettings();
 });
@@ -832,6 +863,11 @@ pinPanel.addEventListener('click', () => {
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     memoTab.cancelCompose();
+  }
+  // 내장 뷰어의 저장 단축키 대체 — 브라우저 "페이지 저장" 대화상자를 막는다.
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    void downloadCurrentPdf();
   }
 });
 

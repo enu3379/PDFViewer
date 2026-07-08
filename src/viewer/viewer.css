@@ -136,6 +136,7 @@ textarea {
   padding: 0 14px;
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
+  overflow-x: auto; /* 극단적으로 좁은 창에서 버튼을 찌그러뜨리는 대신 스크롤 */
 }
 
 .brand {
@@ -183,6 +184,7 @@ textarea {
 .toolbar-button {
   padding: 6px 10px;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .icon-button {
@@ -205,6 +207,7 @@ textarea {
   background: rgb(44 44 42 / .11);
 }
 
+.toolbar-button:disabled,
 .icon-button:disabled {
   cursor: default;
   color: #c6c3b6;
@@ -235,6 +238,8 @@ textarea {
 
 .zoom-label {
   width: 48px;
+  flex: none;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
   text-align: center;

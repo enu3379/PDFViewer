@@ -41,6 +41,11 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
   - manifest 권한 갱신: `declarativeNetRequestWithHostAccess`, `webNavigation`, `notifications`, `file:///*`.
   - URL 판별 헬퍼/테스트와 implementation-plan/windows-local-loading 문서 갱신.
 
+- 뷰어 PDF 저장 기능 (2026-07-09): 툴바 "저장" 버튼 + Ctrl/⌘+S — 내장 뷰어를 대체하며 사라졌던 저장 경로 복원.
+  - PDF.js `getData()` 바이트를 blob 앵커로 저장: 재다운로드 없음(오프라인·드래그&드롭 문서도 동작), 권한 추가 없음.
+  - 파일명은 원본 basename 유지(`.pdf` 보정, 금지 문자 치환), 문서 로드 전에는 버튼 비활성. Ctrl/⌘+S는 브라우저 "페이지 저장" 대화상자를 preventDefault로 대체.
+  - 좁은 창에서 툴바 텍스트가 글자 단위로 꺾이던 문제 수정(nowrap + 툴바 overflow-x 스크롤).
+
 ## Needs QA
 
 - Load `dist/` as an unpacked Chrome extension on macOS.

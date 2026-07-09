@@ -8,7 +8,7 @@ export type FiguresTabCallbacks = {
 
 /**
  * 그림·표 탭 — fig-extract 엔진으로 문서를 스캔해 figure 프리뷰 카드를 렌더한다.
- * 스캔은 탭을 처음 열 때 1회 실행 (lazy). 문서가 바뀌면 setDocument()로 리셋.
+ * 스캔은 PDFDocumentProxy가 준비되는 즉시 1회 실행한다. 문서가 바뀌면 setDocument()로 리셋.
  */
 export class FiguresTab {
   #list: HTMLElement;
@@ -16,6 +16,7 @@ export class FiguresTab {
   #doc: PDFDocumentProxy | null = null;
   #state: 'idle' | 'scanning' | 'done' | 'error' = 'idle';
   #figures: EngineFigure[] = [];
+  #scanGeneration = 0;
 
   constructor(list: HTMLElement, callbacks: FiguresTabCallbacks) {
     this.#list = list;
@@ -29,31 +30,38 @@ export class FiguresTab {
   }
 
   setDocument(doc: PDFDocumentProxy | null): void {
+    this.#scanGeneration += 1;
     this.#doc = doc;
     this.#state = 'idle';
     this.#figures = [];
-    this.#setStatus('그림·표 탭을 열면 문서를 스캔합니다.');
+    this.#setStatus(doc ? 'figure 스캔 준비 중…' : 'PDF를 열면 그림·표를 자동으로 스캔합니다.');
+    this.ensureScanned();
   }
 
-  /** 탭이 열릴 때 호출 — 최초 1회만 스캔 */
+  /** 문서 로드 직후 호출된다. 탭 클릭 시 재호출되어도 최초 1회만 스캔한다. */
   ensureScanned(): void {
     if (this.#state !== 'idle' || !this.#doc) return;
     this.#state = 'scanning';
-    void this.#scan();
+    void this.#scan(this.#scanGeneration);
   }
 
-  async #scan(): Promise<void> {
-    if (!this.#doc) return;
+  async #scan(scanGeneration: number): Promise<void> {
+    const doc = this.#doc;
+    if (!doc) return;
     this.#setStatus('figure 스캔 중…');
     try {
       const result = await FigExtract.extract(null, {
-        pdfDocument: this.#doc,
-        onProgress: (msg) => this.#setStatus(msg)
+        pdfDocument: doc,
+        onProgress: (msg) => {
+          if (this.#scanGeneration === scanGeneration) this.#setStatus(msg);
+        }
       });
+      if (this.#scanGeneration !== scanGeneration) return;
       this.#figures = result.figures;
       this.#state = 'done';
       this.#render();
     } catch (error) {
+      if (this.#scanGeneration !== scanGeneration) return;
       console.error('figure 스캔 실패', error);
       this.#state = 'error';
       this.#setStatus('figure 스캔에 실패했어요. 콘솔 로그를 확인해주세요.');

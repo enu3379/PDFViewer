@@ -23,7 +23,7 @@ figure 감지 엔진(`src/core/fig-extract.js`)의 반입·사용 규약. 엔진
 | `src/core/fig-extract.js` | (vendored) 엔진 본체 (전역 `FigExtract` 등록) |
 | `src/core/fig-extract.d.ts` | strict TS에서 위 .js를 side-effect import하기 위한 스텁 |
 | `src/core/fig-engine.ts` | 타입 정의 + `toPdfRect`/`toFigureEntries` + 전역 `pdfjsLib` 주입 — 통합 접점은 이 파일 하나 |
-| `src/viewer/panel/tab-figures.ts` | 그림·표 탭 UI — 엔진 스캔(lazy)·프리뷰 카드·페이지 점프 |
+| `src/viewer/panel/tab-figures.ts` | 그림·표 탭 UI — PDF 문서 준비 직후 엔진 스캔 시작·프리뷰 카드·페이지 점프 |
 
 ## 사용법
 
@@ -41,7 +41,7 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 
 ## 현재 통합 상태
 
-- `tab-figures.ts`가 구현됨: 그림·표 탭 최초 오픈 시 엔진 스캔 → 프리뷰 카드(크롭 이미지·캡션 텍스트)
+- `tab-figures.ts`가 구현됨: PDF.js 문서 객체가 준비되면 엔진 스캔을 즉시 시작 → 프리뷰 카드(크롭 이미지·캡션 텍스트)
   렌더, 카드 클릭 시 해당 페이지 점프. 결과는 **세션 메모리만** (storage 저장 안 함).
 - 미구현 (M3 잔여, Margin 측): `toFigureEntries()`로 FigureEntry 생성 후 storage 저장,
   captionAnchor 계산, 본문 mentions 스캔·참조 링크 주입(§5.4), 수동 크롭 연동(§6).

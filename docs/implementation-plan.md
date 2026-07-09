@@ -46,7 +46,7 @@
 크롬 내장 PDF 뷰어(PDFium)는 확장이 내부를 수정할 수 없다. 따라서 Hypothesis·Weava와 같은 방식으로 **PDF 내비게이션을 가로채 확장 자체 뷰어 페이지로 대체**한다. PDF.js로 직접 렌더링하므로 텍스트 레이어·좌표·주석을 완전히 통제할 수 있다.
 
 ```text
-[탐색: https://…/x.pdf 또는 arxiv.org/pdf/…]
+[탐색: https://…/x.pdf, arxiv.org/pdf/…, file://…/x.pdf]
         │  (service worker: declarativeNetRequest 동적 리다이렉트)
         ▼
 viewer.html?file=<원본 URL>          hub.html (별도 탭)
@@ -62,8 +62,8 @@ viewer.html?file=<원본 URL>          hub.html (별도 탭)
 
 ### PDF가 열리는 4가지 경로
 
-1. **자동 리다이렉트(주 경로)**: 서비스 워커가 설치 시 DNR 동적 규칙 2개를 등록한다 — (a) `^https://arxiv\.org/(pdf|abs 제외)/…` 형태의 arXiv PDF URL, (b) `\.pdf`로 끝나는 http(s) URL. 규칙 (b)는 해당 오리진에 대한 호스트 권한이 있을 때만 실제로 동작한다(§9). 이 자동 동작은 사용자가 토글로 끌 수 있다(§9 자동 열기 토글) — 끄면 모든 PDF가 크롬 내장 뷰어로 열리고 경로 2만 사용된다.
-2. **툴바 버튼(폴백)**: 임의 URL(확장자 없는 PDF 등)에서 확장 아이콘 클릭 → 현재 탭을 `viewer.html?file=<url>`로 전환. 뷰어에서 fetch가 CORS로 실패하면 "이 사이트 접근 권한이 필요합니다" 배너 + `chrome.permissions.request({origins:[origin+'/*']})` → 재시도.
+1. **자동 리다이렉트(주 경로)**: 서비스 워커가 설치 시 DNR 동적 규칙 3개를 등록한다 — (a) `^https://arxiv\.org/pdf/…` 형태의 arXiv PDF URL, (b) `\.pdf`로 끝나는 http(s) URL, (c) `^file://.*\.pdf$` 로컬 PDF URL. 규칙 (c)는 Chrome 확장 세부정보의 "파일 URL에 대한 액세스 허용"이 켜져 있을 때 커밋 전에 동작하며 Windows UNC(`file://server/share/x.pdf`)도 포함한다. 이 자동 동작은 사용자가 토글로 끌 수 있다(§9 자동 열기 토글) — 끄면 PDF가 크롬 내장 뷰어로 열리고 경로 2만 사용된다.
+2. **툴바 버튼(폴백)**: 임의 URL(확장자 없는 PDF 등)에서 확장 아이콘 클릭 → 확장자가 명확하거나 GET+헤더 판별로 PDF임이 확인되면 현재 탭을 `viewer.html?file=<url>`로 전환한다. 확정 비PDF는 제자리 토스트, 판별 실패는 낙관적으로 뷰어 전환한다.
 3. **뷰어 내 열기**: viewer.html을 file 파라미터 없이 열면 빈 상태 화면(파일 선택 버튼 + 드래그&드롭). `file:` PDF는 "파일 URL 접근 허용" 안내를 함께 표시.
 4. **허브 딥링크**: `viewer.html?file=<url>&anno=<id>` 또는 `&fig=<id>` — 로드 완료 후 해당 주석/그림으로 스크롤 + 플래시. 문서가 URL 없이 저장된 경우(로컬 파일) 허브는 "파일 다시 선택" 흐름으로 유도하고 fingerprint 일치를 검증한다.
 
@@ -298,9 +298,16 @@ renderRegion(pdfDoc, page, rectPdf, maxCssWidth): HTMLCanvasElement
   "minimum_chrome_version": "121",
   "action": { "default_title": "Margin으로 열기" },
   "background": { "service_worker": "sw.js", "type": "module" },
-  "permissions": ["storage", "declarativeNetRequest", "activeTab", "contextMenus"],
-  "host_permissions": ["https://arxiv.org/*"],
-  "optional_host_permissions": ["*://*/*"],
+  "permissions": [
+    "storage",
+    "declarativeNetRequestWithHostAccess",
+    "activeTab",
+    "contextMenus",
+    "scripting",
+    "webNavigation",
+    "notifications"
+  ],
+  "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
   "web_accessible_resources": [
     { "resources": ["viewer.html"], "matches": ["<all_urls>"] }
   ]
@@ -315,7 +322,7 @@ const VIEWER = chrome.runtime.getURL('viewer.html');
 async function syncInterceptRules() {
   const got = await chrome.storage.local.get('margin:settings');
   const auto = got['margin:settings']?.autoIntercept ?? true;
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1, 2] });
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1, 2, 3] });
   if (!auto) return;                       // OFF: 자동 리다이렉트 없음 → 크롬 내장 뷰어 그대로
   await chrome.declarativeNetRequest.updateDynamicRules({
     addRules: [
@@ -323,34 +330,45 @@ async function syncInterceptRules() {
         condition: { regexFilter: '^https://arxiv\\.org/pdf/[^?#]+', resourceTypes: ['main_frame'] },
         action: { type: 'redirect', redirect: { regexSubstitution: VIEWER + '?file=\\0' } } },
       { id: 2, priority: 1,
-        condition: { regexFilter: '^https?://.+\\.pdf([?#].*)?$', resourceTypes: ['main_frame'] },
+        condition: { regexFilter: '^https?://.+\\.pdf([?#].*)?$', isUrlFilterCaseSensitive: false, resourceTypes: ['main_frame'] },
+        action: { type: 'redirect', redirect: { regexSubstitution: VIEWER + '?file=\\0' } } },
+      { id: 3, priority: 1,
+        condition: { regexFilter: '^file://.*\\.pdf$', isUrlFilterCaseSensitive: false, resourceTypes: ['main_frame'] },
         action: { type: 'redirect', redirect: { regexSubstitution: VIEWER + '?file=\\0' } } }
     ]
   });
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
+  await chrome.contextMenus.removeAll();
   chrome.contextMenus.create({ id: 'open-hub', title: '메모 허브 열기', contexts: ['action'] });
-  chrome.contextMenus.create({ id: 'auto-open', type: 'checkbox', checked: true,
+  chrome.contextMenus.create({ id: 'auto-open', type: 'checkbox',
     title: 'PDF 자동으로 Margin에서 열기', contexts: ['action'] });
+  await syncAutoOpenMenuChecked();         // 저장된 autoIntercept 값과 체크 상태 동기화
   await syncInterceptRules();
 });
-chrome.runtime.onStartup.addListener(syncInterceptRules);
+chrome.runtime.onStartup.addListener(() => {
+  void syncAutoOpenMenuChecked();
+  void syncInterceptRules();
+});
 chrome.contextMenus.onClicked.addListener(async info => {
   if (info.menuItemId === 'open-hub') chrome.tabs.create({ url: chrome.runtime.getURL('hub.html') });
   if (info.menuItemId === 'auto-open') {
-    await chrome.storage.local.set({ 'margin:settings': { autoIntercept: !!info.checked } });
+    const current = (await chrome.storage.local.get('margin:settings'))['margin:settings'] ?? {};
+    await chrome.storage.local.set({ 'margin:settings': { ...current, autoIntercept: !!info.checked } });
     await syncInterceptRules();
+    await syncAutoOpenMenuChecked();
   }
 });
-chrome.action.onClicked.addListener(tab => {
-  if (tab.id && tab.url) chrome.tabs.update(tab.id, { url: VIEWER + '?file=' + encodeURIComponent(tab.url) });
+chrome.webNavigation.onBeforeNavigate.addListener(handleLocalPdfFallback, {
+  url: [{ urlPrefix: 'file://', pathSuffix: '.pdf' }, { urlPrefix: 'file://', pathSuffix: '.PDF' }]
 });
+chrome.action.onClicked.addListener(routeActionClick);
 ```
 
-- **자동 열기 토글**: `margin:settings.autoIntercept`(기본 true). 확장 아이콘 우클릭 메뉴의 체크박스 "PDF 자동으로 Margin에서 열기"로 제어한다. 끄면 규칙 1·2가 제거되어 모든 PDF가 크롬 내장 뷰어로 열리고, 아이콘 클릭(§1 경로 2)으로만 Margin이 열린다 — "평소엔 내장 뷰어, 원할 때만 전환" 사용 패턴. 로컬 `file:` PDF는 애초에 리다이렉트 규칙 대상이 아니므로 항상 클릭 방식이며, "파일 URL 액세스 허용"은 뷰어가 file URL을 fetch하기 위한 권한일 뿐 자동 가로채기와 무관하다.
-- 규칙 2는 호스트 권한이 있는 오리진에서만 발동한다. 뷰어에서 fetch 실패 시 §1의 권한 요청 배너 흐름으로 사후 허용(`optional_host_permissions` 사용). 광범위 권한을 기본 요구하지 않는 것이 스토어 심사에 유리하다.
-- PDF 로드: `pdfjsLib.getDocument({ url })` 기본 사용(작은 논문 PDF 기준 range 스트리밍 불요). `file:` URL은 "파일 URL 접근 허용" 미설정 시 안내 배너.
+- **자동 열기 토글**: `margin:settings.autoIntercept`(기본 true). 확장 아이콘 우클릭 메뉴의 체크박스 "PDF 자동으로 Margin에서 열기"로 제어한다. 로컬 `file:` PDF도 자동 열기 대상이다: "파일 URL 액세스 허용"이 켜져 있으면 DNR 규칙 3(`^file://.*\.pdf$`)이 커밋 전에 뷰어로 리다이렉트하고, 꺼져 있으면 webNavigation 폴백이 탭을 뷰어로 교체해 권한 안내 상태를 띄운다(pdf.js 공식 확장과 동일 구조, docs/issue-1-open-ux.md §5.2). 자동 열기 토글 OFF면 두 경로 모두 비활성.
+- 규칙 2는 `http://*/*`, `https://*/*` 호스트 권한이 있는 오리진에서 발동한다. 확장자 없는 PDF는 액션 클릭 시 GET+헤더 판별 후 뷰어로 전환한다.
+- PDF 로드: `pdfjsLib.getDocument({ url })` 기본 사용(작은 논문 PDF 기준 range 스트리밍 불요). `file:` URL은 "파일 URL 접근 허용" 미설정 시 권한 안내 상태를 먼저 표시한다.
 
 ---
 

@@ -1,8 +1,8 @@
 import 'pdfjs-dist/web/pdf_viewer.css';
 import './viewer.css';
 import { createAnchorFromRange, repairAnchor } from '../core/anchor';
-import { parseLinks, parseTags } from '../core/format';
-import { parseViewableUrl } from '../core/pdf-url';
+import { escapeHtml, parseLinks, parseTags } from '../core/format';
+import { isFileUrl, parseViewableUrl } from '../core/pdf-url';
 import {
   DEFAULT_PEN_THEME,
   isPenTheme,
@@ -54,11 +54,41 @@ function basenameFromUrl(value: string): string {
   }
 }
 
+function pdfDownloadName(base: string): string {
+  const cleaned = base.replace(/[\\/:*?"<>|]/g, '-').trim() || 'document';
+  return cleaned.toLowerCase().endsWith('.pdf') ? cleaned : `${cleaned}.pdf`;
+}
+
 function runtimeUrl(path: string): string {
   if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
     return chrome.runtime.getURL(path);
   }
   return path;
+}
+
+function isFileSchemeUrl(raw: string): boolean {
+  const url = parseViewableUrl(raw);
+  return Boolean(url && isFileUrl(url));
+}
+
+function fileAccessSettingsUrl(): string {
+  const extensionId = typeof chrome !== 'undefined' ? chrome.runtime?.id : '';
+  return `chrome://extensions/?id=${extensionId}`;
+}
+
+async function canReadFileSchemeUrls(): Promise<boolean> {
+  if (typeof chrome === 'undefined' || !chrome.extension?.isAllowedFileSchemeAccess) return true;
+  try {
+    return await chrome.extension.isAllowedFileSchemeAccess();
+  } catch {
+    return false;
+  }
+}
+
+// PDF.js 예외는 Error 서브클래스가 아닐 수 있어 name 필드로 구분한다.
+function isMissingPdfError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { name?: unknown }).name === 'MissingPDFException';
 }
 
 function requireElement<T extends Element>(selector: string): T {
@@ -68,7 +98,7 @@ function requireElement<T extends Element>(selector: string): T {
 }
 
 function showOnly(section: HTMLElement | null): void {
-  for (const el of [emptyState, pendingState, errorState, readRow]) {
+  for (const el of [emptyState, pendingState, errorState, fileAccessState, missingFileState, readRow]) {
     el?.setAttribute('hidden', '');
   }
   section?.removeAttribute('hidden');
@@ -76,6 +106,7 @@ function showOnly(section: HTMLElement | null): void {
 
 function setLoading(label: string): void {
   if (pendingUrl) pendingUrl.textContent = label;
+  downloadButton.disabled = true;
   showOnly(pendingState);
 }
 
@@ -83,6 +114,48 @@ function setError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   if (errorMessage) errorMessage.textContent = message;
   showOnly(errorState);
+}
+
+function showFileAccessState(): void {
+  fileAccessSettingsFallback.hidden = true;
+  fileAccessSettingsFallback.textContent = '';
+  showOnly(fileAccessState);
+}
+
+function showMissingFileState(file: string): void {
+  missingFileUrl.textContent = file;
+  showOnly(missingFileState);
+}
+
+async function openFileAccessSettings(): Promise<void> {
+  const url = fileAccessSettingsUrl();
+  try {
+    await chrome.tabs.update({ url });
+  } catch {
+    fileAccessSettingsFallback.textContent = url;
+    fileAccessSettingsFallback.hidden = false;
+  }
+}
+
+function openFilePicker(): void {
+  fileInput.value = '';
+  fileInput.click();
+}
+
+let downloadName = 'document.pdf';
+
+async function downloadCurrentPdf(): Promise<void> {
+  const doc = host.pdfDocument;
+  if (!doc || downloadButton.disabled) return;
+  const data = await doc.getData();
+  // getData()의 Uint8Array<ArrayBufferLike>는 BlobPart와 타입이 안 맞아 ArrayBuffer 사본으로 감싼다.
+  const blob = new Blob([new Uint8Array(data)], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = downloadName;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function flashElement(el: HTMLElement): void {
@@ -181,37 +254,29 @@ function markTocForPage(page: number): void {
   }
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
-    switch (char) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      case "'":
-        return '&#39;';
-      default:
-        return char;
-    }
-  });
-}
-
 async function loadUrl(file: string): Promise<void> {
   setLoading(file);
   if (fileLabel) fileLabel.textContent = basenameFromUrl(file);
+  const isLocalFile = isFileSchemeUrl(file);
+  if (isLocalFile && !(await canReadFileSchemeUrls())) {
+    showFileAccessState();
+    return;
+  }
   try {
     await host.loadUrl(file);
     await initializeDoc(basenameFromUrl(file), file);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
+    downloadName = pdfDownloadName(basenameFromUrl(file));
+    downloadButton.disabled = false;
     showOnly(readRow);
     host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    if (isLocalFile && isMissingPdfError(error)) {
+      showMissingFileState(file);
+      return;
+    }
     setError(error);
   }
 }
@@ -223,6 +288,8 @@ async function loadSelectedFile(file: File): Promise<void> {
     await host.loadFile(file);
     await initializeDoc(file.name);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
+    downloadName = pdfDownloadName(file.name);
+    downloadButton.disabled = false;
     showOnly(readRow);
     host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
@@ -597,10 +664,18 @@ function setupPanelResize(): void {
 const emptyState = requireElement<HTMLElement>('#emptyState');
 const pendingState = requireElement<HTMLElement>('#pendingState');
 const errorState = requireElement<HTMLElement>('#errorState');
+const fileAccessState = requireElement<HTMLElement>('#fileAccessState');
+const missingFileState = requireElement<HTMLElement>('#missingFileState');
 const readRow = requireElement<HTMLElement>('#readRow');
 const fileLabel = requireElement<HTMLElement>('#fileLabel');
 const pendingUrl = requireElement<HTMLElement>('#pendingUrl');
 const errorMessage = requireElement<HTMLElement>('#errorMessage');
+const downloadButton = requireElement<HTMLButtonElement>('#downloadButton');
+const fileAccessSettings = requireElement<HTMLButtonElement>('#fileAccessSettings');
+const fileAccessPickFile = requireElement<HTMLButtonElement>('#fileAccessPickFile');
+const fileAccessSettingsFallback = requireElement<HTMLElement>('#fileAccessSettingsFallback');
+const missingFilePickFile = requireElement<HTMLButtonElement>('#missingFilePickFile');
+const missingFileUrl = requireElement<HTMLElement>('#missingFileUrl');
 const hubButton = requireElement<HTMLButtonElement>('#hubButton');
 const fileInput = requireElement<HTMLInputElement>('#fileInput');
 const viewerContainer = requireElement<HTMLDivElement>('#viewerContainer');
@@ -732,6 +807,17 @@ hubButton.addEventListener('click', () => {
   location.href = runtimeUrl('hub.html');
 });
 
+downloadButton.addEventListener('click', () => {
+  void downloadCurrentPdf();
+});
+
+fileAccessSettings.addEventListener('click', () => {
+  void openFileAccessSettings();
+});
+
+fileAccessPickFile.addEventListener('click', openFilePicker);
+missingFilePickFile.addEventListener('click', openFilePicker);
+
 fileInput.addEventListener('change', () => {
   const [file] = Array.from(fileInput.files ?? []);
   if (file) void loadSelectedFile(file);
@@ -777,6 +863,11 @@ pinPanel.addEventListener('click', () => {
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     memoTab.cancelCompose();
+  }
+  // 내장 뷰어의 저장 단축키 대체 — 브라우저 "페이지 저장" 대화상자를 막는다.
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    void downloadCurrentPdf();
   }
 });
 

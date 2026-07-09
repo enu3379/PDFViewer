@@ -136,6 +136,7 @@ textarea {
   padding: 0 14px;
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
+  overflow-x: auto; /* 극단적으로 좁은 창에서 버튼을 찌그러뜨리는 대신 스크롤 */
 }
 
 .brand {
@@ -183,6 +184,7 @@ textarea {
 .toolbar-button {
   padding: 6px 10px;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .icon-button {
@@ -205,6 +207,7 @@ textarea {
   background: rgb(44 44 42 / .11);
 }
 
+.toolbar-button:disabled,
 .icon-button:disabled {
   cursor: default;
   color: #c6c3b6;
@@ -235,6 +238,8 @@ textarea {
 
 .zoom-label {
   width: 48px;
+  flex: none;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
   text-align: center;
@@ -422,6 +427,45 @@ textarea {
   display: none;
 }
 
+.state-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 2px 0 12px;
+}
+
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: #45433c;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 16px;
+}
+
+.secondary-button:hover {
+  background: #f4f2eb;
+}
+
+.copy-url {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgb(255 255 255 / .55);
+  color: #6b695f !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px !important;
+  line-height: 1.55 !important;
+  margin: 14px auto 0 !important;
+  max-width: 100%;
+  padding: 8px 10px;
+  user-select: text;
+}
+
 .hint {
   margin-top: 14px !important;
   color: var(--soft) !important;
@@ -441,6 +485,16 @@ textarea {
 
 .error-state p {
   color: #8f3b3b;
+}
+
+.file-access-state h1::before {
+  content: "";
+  display: block;
+  width: 9px;
+  height: 9px;
+  margin: 0 auto 18px;
+  border-radius: 50%;
+  background: var(--blue);
 }
 
 /* ── 패널 ── */

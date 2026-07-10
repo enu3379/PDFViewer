@@ -16,6 +16,41 @@ import type { DocId, DocMeta } from '../core/types';
 
 GlobalWorkerOptions.workerSrc = workerSrc;
 
+export type PdfDestination = string | unknown[];
+
+export type ResolvedDestination = {
+  page: number;
+  y: number | null;
+};
+
+type InternalDestinationHandler = (destination: PdfDestination) => boolean | Promise<boolean>;
+
+class MarginLinkService extends PDFLinkService {
+  #onInternalDestination: InternalDestinationHandler;
+
+  constructor(
+    options: ConstructorParameters<typeof PDFLinkService>[0],
+    onInternalDestination: InternalDestinationHandler
+  ) {
+    super(options);
+    this.#onInternalDestination = onInternalDestination;
+  }
+
+  override async goToDestination(destination: PdfDestination): Promise<void> {
+    try {
+      if (await this.#onInternalDestination(destination)) return;
+    } catch (error) {
+      // A failed panel lookup must never make an ordinary PDF link unusable.
+      console.warn('internal PDF destination interception failed', error);
+    }
+    await super.goToDestination(destination);
+  }
+
+  async goToDestinationWithoutInterception(destination: PdfDestination): Promise<void> {
+    await super.goToDestination(destination);
+  }
+}
+
 export type OutlineNode = {
   title: string;
   dest: string | unknown[] | null;
@@ -40,11 +75,12 @@ type PdfHostElements = {
 type PdfHostCallbacks = {
   onPageChange?: (page: number, pageCount: number) => void;
   onScaleChange?: (scale: number, presetValue?: string) => void;
+  onInternalDestination?: InternalDestinationHandler;
 };
 
 export class PdfHost {
   readonly eventBus: EventBus;
-  readonly linkService: PDFLinkService;
+  readonly linkService: MarginLinkService;
   readonly viewer: PDFViewer;
   readonly version = pdfjsVersion;
 
@@ -54,11 +90,14 @@ export class PdfHost {
   constructor(elements: PdfHostElements, callbacks: PdfHostCallbacks = {}) {
     this.#callbacks = callbacks;
     this.eventBus = new EventBus();
-    this.linkService = new PDFLinkService({
-      eventBus: this.eventBus,
-      externalLinkTarget: LinkTarget.BLANK,
-      ignoreDestinationZoom: true
-    });
+    this.linkService = new MarginLinkService(
+      {
+        eventBus: this.eventBus,
+        externalLinkTarget: LinkTarget.BLANK,
+        ignoreDestinationZoom: true
+      },
+      (destination) => this.#callbacks.onInternalDestination?.(destination) ?? false
+    );
     this.viewer = new PDFViewer({
       container: elements.container,
       viewer: elements.viewer,
@@ -235,9 +274,41 @@ export class PdfHost {
       return;
     }
     if (item.dest) {
-      await this.linkService.goToDestination(item.dest as string | unknown[]);
+      await this.linkService.goToDestinationWithoutInterception(item.dest);
     } else if (item.page) {
       this.setPage(item.page);
+    }
+  }
+
+  async resolveDestination(destination: PdfDestination): Promise<ResolvedDestination | null> {
+    if (!this.#doc) return null;
+    try {
+      const explicitDestination = typeof destination === 'string'
+        ? await this.#doc.getDestination(destination)
+        : destination;
+      if (!explicitDestination?.length) return null;
+
+      const first = explicitDestination[0];
+      let page: number | null = null;
+      if (typeof first === 'number') {
+        page = first + 1;
+      } else if (first && typeof first === 'object' && 'num' in first && 'gen' in first) {
+        page = (await this.#doc.getPageIndex(first as { num: number; gen: number })) + 1;
+      }
+      if (!page) return null;
+
+      const mode = explicitDestination[1];
+      const modeName = mode && typeof mode === 'object' && 'name' in mode
+        && typeof (mode as { name?: unknown }).name === 'string'
+        ? (mode as { name: string }).name
+        : null;
+      const yIndex = modeName === 'XYZ' ? 3 : modeName === 'FitH' || modeName === 'FitBH' ? 2 : null;
+      const y = yIndex !== null && typeof explicitDestination[yIndex] === 'number'
+        ? explicitDestination[yIndex] as number
+        : null;
+      return { page, y };
+    } catch {
+      return null;
     }
   }
 
@@ -252,19 +323,8 @@ export class PdfHost {
   }
 
   async #resolveDestPage(dest: string | unknown[] | null): Promise<number | null> {
-    if (!this.#doc || !dest) return null;
-    try {
-      const destArray = typeof dest === 'string' ? await this.#doc.getDestination(dest) : dest;
-      if (!destArray?.length) return null;
-      const first = destArray[0];
-      if (typeof first === 'number') return first + 1;
-      if (first && typeof first === 'object' && 'num' in first && 'gen' in first) {
-        return (await this.#doc.getPageIndex(first as { num: number; gen: number })) + 1;
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    if (!dest) return null;
+    return (await this.resolveDestination(dest))?.page ?? null;
   }
 
   #emitPageChange(): void {

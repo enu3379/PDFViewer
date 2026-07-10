@@ -1037,3 +1037,92 @@ body.resizing-panel .panel-resize::after {
   line-height: 1.45;
   color: #556;
 }
+
+/* 참조 탭 (tab-references.ts) */
+.reference-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.reference-card {
+  border: 1px solid #e2e4e8;
+  border-radius: 8px;
+  background: #fff;
+  padding: 11px 12px;
+}
+
+.reference-card.on {
+  border-color: #d7b05a;
+  background: #fffaf0;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.reference-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: #45485a;
+  font-size: 12px;
+}
+
+.reference-head span {
+  color: #778;
+  font-size: 11px;
+}
+
+.reference-text {
+  margin: 8px 0 0;
+  color: #556;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.reference-backrefs {
+  border-top: 1px solid #edf0f2;
+  margin-top: 10px;
+  padding-top: 9px;
+}
+
+.reference-backref-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+
+.reference-mention {
+  align-items: baseline;
+  border: 0;
+  border-radius: 4px;
+  color: #556;
+  cursor: pointer;
+  display: flex;
+  gap: 7px;
+  margin: 0 -4px;
+  padding: 5px 4px;
+  text-align: left;
+  width: calc(100% + 8px);
+}
+
+.reference-mention:hover {
+  background: #f4f5f7;
+}
+
+.reference-mention-page {
+  color: var(--accent);
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reference-mention-text {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.reference-backref-empty {
+  color: var(--soft);
+  font-size: 11px;
+  margin: 0;
+}

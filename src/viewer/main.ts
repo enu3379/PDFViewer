@@ -17,6 +17,7 @@ import type { Highlight, Memo, PenColor } from '../core/types';
 import { HighlightOverlay } from './overlay-highlights';
 import { FiguresTab } from './panel/tab-figures';
 import { MemoTab } from './panel/tab-memos';
+import { ReferencesTab } from './panel/tab-references';
 import { type FlatOutlineItem, PdfHost } from './pdf-host';
 
 const PANEL_WIDTH_KEY = 'margin:panelWidth';
@@ -256,6 +257,7 @@ function markTocForPage(page: number): void {
 async function loadUrl(file: string): Promise<void> {
   setLoading(file);
   figuresTab.setDocument(null);
+  referencesTab.setDocument(null);
   if (fileLabel) fileLabel.textContent = basenameFromUrl(file);
   const isLocalFile = isFileSchemeUrl(file);
   if (isLocalFile && !(await canReadFileSchemeUrls())) {
@@ -265,6 +267,7 @@ async function loadUrl(file: string): Promise<void> {
   try {
     const doc = await host.loadUrl(file);
     figuresTab.setDocument(doc);
+    referencesTab.setDocument(doc);
     await initializeDoc(basenameFromUrl(file), file);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(basenameFromUrl(file));
@@ -275,6 +278,7 @@ async function loadUrl(file: string): Promise<void> {
     renderToc(await host.getOutlineItems());
   } catch (error) {
     figuresTab.setDocument(null);
+    referencesTab.setDocument(null);
     if (isLocalFile && isMissingPdfError(error)) {
       showMissingFileState(file);
       return;
@@ -286,10 +290,12 @@ async function loadUrl(file: string): Promise<void> {
 async function loadSelectedFile(file: File): Promise<void> {
   setLoading(file.name);
   figuresTab.setDocument(null);
+  referencesTab.setDocument(null);
   if (fileLabel) fileLabel.textContent = file.name;
   try {
     const doc = await host.loadFile(file);
     figuresTab.setDocument(doc);
+    referencesTab.setDocument(doc);
     await initializeDoc(file.name);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(file.name);
@@ -300,6 +306,7 @@ async function loadSelectedFile(file: File): Promise<void> {
     renderToc(await host.getOutlineItems());
   } catch (error) {
     figuresTab.setDocument(null);
+    referencesTab.setDocument(null);
     setError(error);
   }
 }
@@ -700,6 +707,7 @@ const closePanelButton = requireElement<HTMLButtonElement>('#closePanel');
 const pinPanel = requireElement<HTMLButtonElement>('#pinPanel');
 const tocList = requireElement<HTMLElement>('#tocList');
 const figList = requireElement<HTMLElement>('#figList');
+const referenceList = requireElement<HTMLElement>('#referenceList');
 const composeSlot = requireElement<HTMLElement>('#composeSlot');
 const pensRow = requireElement<HTMLElement>('#pensRow');
 const penThemeButton = requireElement<HTMLButtonElement>('#penTheme');
@@ -747,7 +755,14 @@ const host = new PdfHost(
   { container: viewerContainer, viewer: viewerElement },
   {
     onPageChange: setPageUi,
-    onScaleChange: setScaleUi
+    onScaleChange: setScaleUi,
+    onInternalDestination: async (destination) => {
+      const resolved = await host.resolveDestination(destination);
+      if (!resolved) return false;
+      const opened = await referencesTab.openDestination(resolved);
+      if (opened) openPanel('references');
+      return opened;
+    }
   }
 );
 
@@ -788,6 +803,13 @@ const memoTab = new MemoTab(
     onComposeHighlightChange: (highlightId) => overlay.setActive(highlightId)
   }
 );
+
+const referencesTab = new ReferencesTab(referenceList, {
+  onJumpToPage: (page) => {
+    host.setPage(page);
+    if (!pinned) closePanel();
+  }
+});
 
 setActivePen(currentPen);
 applyPenTheme(penTheme);

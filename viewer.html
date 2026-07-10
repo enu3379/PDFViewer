@@ -91,6 +91,7 @@
             <div class="ptabs">
               <button class="ptab on" data-tab="toc" type="button">목차</button>
               <button class="ptab" data-tab="figures" type="button">그림·표</button>
+              <button class="ptab" data-tab="references" type="button">참조</button>
               <button class="ptab" data-tab="memos" type="button">메모 <span id="memoTabN"></span></button>
               <span class="spacer"></span>
               <button class="pico on" id="pinPanel" title="고정됨 — 클릭해 해제" aria-label="패널 고정" type="button">⌖</button>
@@ -103,6 +104,11 @@
               <section class="tab-page" data-tab="figures" hidden>
                 <div id="figList" class="fig-list">
                   <div class="empty">PDF를 열면 그림·표를 자동으로 스캔합니다.</div>
+                </div>
+              </section>
+              <section class="tab-page" data-tab="references" hidden>
+                <div id="referenceList" class="reference-list">
+                  <div class="empty">PDF를 열면 참고문헌과 본문 인용 위치를 여기에 모아 보여줍니다.</div>
                 </div>
               </section>
               <section class="tab-page" data-tab="memos" hidden>

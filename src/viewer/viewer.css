@@ -1002,15 +1002,26 @@ body.resizing-panel .panel-resize::after {
 }
 
 .fig-card {
+  display: block;
+  width: 100%;
   overflow: hidden;
   cursor: pointer;
   border: 1px solid #e2e4e8;
   border-radius: 8px;
   background: #fff;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: left;
 }
 
 .fig-card:hover {
   box-shadow: 0 2px 8px rgb(30 40 90 / 0.12);
+}
+
+.fig-card:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .fig-card img {
@@ -1030,10 +1041,16 @@ body.resizing-panel .panel-resize::after {
 }
 
 .fig-card .fig-cap {
+  display: block;
   max-height: 6.5em;
   margin: 6px 10px 10px;
   overflow: auto;
   font-size: 11px;
   line-height: 1.45;
   color: #556;
+}
+
+.fig-retry {
+  display: block;
+  margin: 10px auto 0;
 }

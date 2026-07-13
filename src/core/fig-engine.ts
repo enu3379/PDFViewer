@@ -57,8 +57,19 @@ export interface FigExtractApi {
   cropBlob(fig: EngineFigure): Promise<Blob>;
 }
 
-export const FigExtract: FigExtractApi =
-  (globalThis as unknown as { FigExtract: FigExtractApi }).FigExtract;
+export function requireFigExtract(scope: { FigExtract?: FigExtractApi }): FigExtractApi {
+  const api = scope.FigExtract;
+  if (!api) {
+    throw new Error(
+      'FigExtract가 전역에 등록되지 않았습니다. "./fig-extract.js" side-effect import가 실행되었는지 확인하세요.'
+    );
+  }
+  return api;
+}
+
+export const FigExtract = requireFigExtract(
+  globalThis as unknown as { FigExtract?: FigExtractApi }
+);
 
 /**
  * 엔진 좌표(pt, 좌상단 원점) → PDF user space PdfRect [x1, y1, x2, y2] (좌하단 원점).

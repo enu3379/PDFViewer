@@ -225,8 +225,9 @@ onMouseUp:
 > figure 캡션·영역 감지는 별도 저장소(figure-preview-test)에서 개발·검증되는
 > **fig-extract 엔진**(`core/fig-extract.js`, vendored)이 담당한다. 
 
-- 사용: `core/fig-engine.ts`의 `FigExtract.extract()` → `toFigureEntries()`로 `FigureEntry` 생성.
-  좌표 변환(`toPdfRect`, 엔진의 좌상단 원점 pt → PDF user space) 포함.
+- 사용: `core/fig-engine.ts`의 `FigExtract.extract()` → `toFigureEntries()`로 `FigureSeed[]` 생성 후,
+  호출 측에서 `doc`과 `captionAnchor`를 채워 `FigureEntry`를 완성한다. 좌표 변환(`toPdfRect`, 엔진의
+  좌상단 원점 pt → PDF user space)은 `toFigureEntries()`가 담당한다.
 - 시작 시점: Margin 뷰어가 `PDFDocumentProxy`를 확보하는 즉시 엔진 스캔을 시작한다. 그림·표 탭 오픈은
   결과 표시 또는 진행 상태 확인만 담당한다.
 - **문서 내 figure 목록(존재·번호·region·captionText)의 단일 진실 공급원은 엔진이다.**

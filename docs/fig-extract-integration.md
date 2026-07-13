@@ -1,9 +1,9 @@
 # fig-extract 엔진 통합 규약
 
 figure 감지 엔진(`src/core/fig-extract.js`)의 반입·사용 규약. 엔진 알고리즘은 별도
-저장소 **figure-preview-test**에서 개발·검증되며, 이 repo에는 빌드 산출물처럼 vendoring한다.
+저장소 **PDFViewer-Figure-Extract**에서 개발·검증되며, 이 repo에는 빌드 산출물처럼 vendoring한다.
 
-엔진 repo 문서 (로컬 `C:\Users\kimde\Desktop\figure-preview-test`, 원격 https://github.com/onetwothr1/PDFViewer-Figure-Extract):
+엔진 repo 문서 (원격 https://github.com/onetwothr1/PDFViewer-Figure-Extract):
 - `docs/DEV.md` — 엔진 개발 진입점 (통합 계약, 릴리스 절차, 로드맵)
 - `docs/ALGORITHM.md` — 감지 알고리즘 상세
 

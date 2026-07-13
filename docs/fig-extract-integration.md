@@ -9,7 +9,7 @@ figure 감지 엔진(`src/core/fig-extract.js`)의 반입·사용 규약. 엔진
 
 ## 작업 경계
 
-- **엔진(figure-preview-test) 담당**: 문서에 어떤 figure가 존재하는가(번호·페이지), region bbox(그림 영역만),
+- **엔진(PDFViewer-Figure-Extract) 담당**: 문서에 어떤 figure가 존재하는가(번호·페이지), region bbox(그림 영역만),
   캡션 전체 텍스트, 캡션 블록 bbox. → **문서 내 figure 목록의 단일 진실 공급원은 엔진이다.**
 - **Margin 담당**: `fig-engine.ts`(타입 래퍼, `toPdfRect`/`toFigureEntries` 변환),
   captionAnchor(엔진이 준 captionText를 S_p에서 검색해 오프셋 계산), 본문 mentions 스캔·링크 주입(§5.4, `mentions.ts`),

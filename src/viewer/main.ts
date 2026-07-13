@@ -803,7 +803,6 @@ function jumpToFigure(figId: string): void {
   } else {
     host.setPage(figure.page);
   }
-  if (!pinned) closePanel();
 }
 
 function jumpToFigureMention(refKey: string): void {

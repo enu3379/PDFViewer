@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { figureMentions, scanFigureReferences } from '../src/core/mentions';
+import { figureMentions, nearestFigureMention, scanFigureReferences, type FigureReference } from '../src/core/mentions';
 import type { FigureEntry } from '../src/core/types';
 
 const figures: FigureEntry[] = [
@@ -49,5 +49,43 @@ describe('figure mentions', () => {
     const refs = scanFigureReferences({ page: 4, text: 'See figure 1 and FIG. 2.' }, figures);
 
     expect(refs.map((ref) => ref.figId)).toEqual(['fig1-p1', 'fig2-p2']);
+  });
+});
+
+describe('nearestFigureMention', () => {
+  const mention = (key: string, figId: string, page: number, yPdf: number | undefined, isCaptionLabel = false): FigureReference => ({
+    key,
+    figId,
+    page,
+    start: 0,
+    end: 6,
+    quote: 'Fig. 2',
+    yPdf,
+    isCaptionLabel
+  });
+
+  const refs: FigureReference[] = [
+    mention('top', 'fig2-p2', 3, 700),
+    mention('mid', 'fig2-p2', 3, 420),
+    mention('caption', 'fig2-p2', 3, 415, true),
+    mention('other-fig', 'fig1-p1', 3, 418),
+    mention('other-page', 'fig2-p2', 5, 421),
+    mention('no-y', 'fig2-p2', 3, undefined)
+  ];
+
+  it('picks the same-page mention nearest to the click y', () => {
+    expect(nearestFigureMention(refs, 'fig2-p2', 3, 419)?.key).toBe('mid');
+    expect(nearestFigureMention(refs, 'fig2-p2', 3, 690)?.key).toBe('top');
+  });
+
+  it('ignores caption labels, other figures, other pages, and y-less mentions', () => {
+    expect(nearestFigureMention(refs, 'fig2-p2', 3, 415)?.key).toBe('mid');
+    expect(nearestFigureMention(refs, 'fig2-p2', 5, 421)?.key).toBe('other-page');
+    expect(nearestFigureMention(refs, 'fig1-p1', 1, 400)).toBeNull();
+  });
+
+  it('returns null when no mention qualifies', () => {
+    expect(nearestFigureMention([], 'fig2-p2', 3, 100)).toBeNull();
+    expect(nearestFigureMention(refs, 'fig2-p2', 7, 100)).toBeNull();
   });
 });

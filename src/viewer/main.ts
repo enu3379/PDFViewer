@@ -4,7 +4,7 @@ import { createAnchorFromRange, repairAnchor } from '../core/anchor';
 import { FigExtract, toFigureEntries, type FigureSeed } from '../core/fig-engine';
 import { findCaptionAnchor, mergeFigureEntries } from '../core/figures';
 import { escapeHtml, parseLinks, parseTags } from '../core/format';
-import { figureMentions, injectFigureReferenceLinks, scanFigureReferences, updateReferenceLinkActive, type FigureReference } from '../core/mentions';
+import { figureMentions, injectFigureReferenceLinks, nearestFigureMention, scanFigureReferences, updateReferenceLinkActive, type FigureReference } from '../core/mentions';
 import { isFileUrl, parseViewableUrl } from '../core/pdf-url';
 import { renderRegionDataURL } from '../core/render-region';
 import {
@@ -31,6 +31,7 @@ const PANEL_MAX_WIDTH = 560;
 const VIEWER_MIN_WIDTH = 360;
 const PANEL_STEP = 16;
 const DEST_MATCH_TOLERANCE_PT = 40;
+const ANNOTATION_ORIGIN_TTL_MS = 3000;
 
 type TextScanIndex = {
   page: number;
@@ -726,10 +727,37 @@ function handleFigureReferenceClick(event: MouseEvent): void {
   openFigurePanel(figId, link.dataset.cap === '1' ? null : link.dataset.refKey ?? null);
 }
 
+function rememberAnnotationLinkOrigin(event: MouseEvent): void {
+  const link = (event.target as Element).closest<HTMLElement>('.annotationLayer a');
+  if (!link || !viewerContainer.contains(link)) return;
+  const pageDiv = link.closest<HTMLElement>('.page');
+  const pageNumber = Number(pageDiv?.dataset.pageNumber);
+  if (!pageDiv || !Number.isInteger(pageNumber) || pageNumber < 1) return;
+  const viewport = host.getPageViewport(pageNumber);
+  if (!viewport) return;
+  const pageBounds = pageDiv.getBoundingClientRect();
+  const yPdf = viewport.convertToPdfPoint(
+    event.clientX - pageBounds.left,
+    event.clientY - pageBounds.top
+  )[1];
+  annotationLinkOrigin = { page: pageNumber, yPdf, at: Date.now() };
+}
+
+function takeAnnotationLinkOrigin(): { page: number; yPdf: number } | null {
+  const origin = annotationLinkOrigin;
+  annotationLinkOrigin = null;
+  if (!origin || Date.now() - origin.at > ANNOTATION_ORIGIN_TTL_MS) return null;
+  return { page: origin.page, yPdf: origin.yPdf };
+}
+
 function handleInternalDestination(destination: ResolvedPdfDestination): boolean {
+  const origin = takeAnnotationLinkOrigin();
   const figure = findFigureForDestination(destination);
   if (!figure) return false;
-  openFigurePanel(figure.id);
+  const originMention = origin
+    ? nearestFigureMention(figureReferences, figure.id, origin.page, origin.yPdf)
+    : null;
+  openFigurePanel(figure.id, originMention?.key ?? null);
   return true;
 }
 
@@ -1076,6 +1104,7 @@ let figureReferences: FigureReference[] = [];
 const captionYByFigure = new Map<string, number>();
 let activeFigureId: string | null = null;
 let activeOriginRefKey: string | null = null;
+let annotationLinkOrigin: { page: number; yPdf: number; at: number } | null = null;
 let pendingCrop: CropPreviewState | null = null;
 
 function setActivePen(color: PenColor): void {
@@ -1205,6 +1234,7 @@ fileInput.addEventListener('change', () => {
 viewerContainer.addEventListener('mouseup', () => {
   window.setTimeout(handleSelection, 0);
 });
+viewerContainer.addEventListener('click', rememberAnnotationLinkOrigin, true);
 viewerContainer.addEventListener('click', handleFigureReferenceClick);
 
 prevPage.addEventListener('click', () => host.previousPage());

@@ -59,6 +59,27 @@ export function referenceKey(figId: string, page: number, start: number, end: nu
   return `${figId}:${page}:${start}:${end}`;
 }
 
+/** 내장 링크 원점 매칭(FG-R1) — 클릭 페이지에서 y가 가장 가까운 같은 피규어 언급. 다른 페이지는 후보로 삼지 않는다. */
+export function nearestFigureMention(
+  references: FigureReference[],
+  figId: string,
+  page: number,
+  yPdf: number
+): FigureReference | null {
+  let best: FigureReference | null = null;
+  let bestDistance = Infinity;
+  for (const reference of references) {
+    if (reference.figId !== figId || reference.isCaptionLabel) continue;
+    if (reference.page !== page || reference.yPdf === undefined) continue;
+    const distance = Math.abs(reference.yPdf - yPdf);
+    if (distance < bestDistance) {
+      best = reference;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
 export function injectFigureReferenceLinks(
   pageDiv: HTMLElement,
   index: PageTextIndex,

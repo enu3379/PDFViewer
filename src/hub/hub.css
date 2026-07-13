@@ -9,6 +9,8 @@
   --line: #dad6ca;
   --line-soft: #e7e4da;
   --accent: #BA7517;
+  --accent-deep: #8A5610;
+  --accent-wash: rgb(250 213 126 / .30);
   --blue: #185FA5;
 }
 
@@ -82,4 +84,214 @@ body {
   padding: 48px 16px;
   border: 1px dashed var(--line);
   border-radius: 12px;
+}
+
+.doc-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.doc-card {
+  position: relative;
+  padding: 14px 15px 13px;
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: var(--paper);
+}
+
+.doc-card-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.doc-open {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--serif);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doc-open:disabled {
+  cursor: default;
+}
+
+.doc-more {
+  flex: none;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.doc-more:hover {
+  background: rgb(44 44 42 / .06);
+}
+
+.doc-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.sync-badge {
+  height: 19px;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}
+
+.sync-badge .d {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.sync-badge.is-syncing {
+  background: var(--accent-wash);
+  color: var(--accent-deep);
+}
+
+.sync-badge.is-syncing .d {
+  background: var(--accent);
+}
+
+.sync-badge.is-undecided {
+  border: 1.4px dashed var(--line);
+  color: var(--muted);
+}
+
+.sync-badge.is-undecided .d {
+  width: 5px;
+  height: 5px;
+  border: 1.4px solid var(--soft);
+  background: transparent;
+}
+
+.doc-menu {
+  position: absolute;
+  z-index: 20;
+  top: 39px;
+  right: 10px;
+  width: 120px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 10px 28px rgb(44 44 42 / .16);
+}
+
+.doc-menu button {
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11.5px;
+  text-align: left;
+}
+
+.doc-menu button:hover {
+  background: rgb(44 44 42 / .06);
+}
+
+.doc-menu .doc-delete {
+  color: #8d3d31;
+}
+
+.hub-toast {
+  position: fixed;
+  z-index: 80;
+  left: 50%;
+  bottom: 24px;
+  max-width: min(520px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  padding: 10px 13px;
+  border-radius: 9px;
+  background: #27241f;
+  color: #fffaf0;
+  box-shadow: 0 14px 32px rgb(0 0 0 / .22);
+  font-size: 12px;
+}
+
+.delete-dialog {
+  width: min(400px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--paper);
+  color: var(--text);
+  box-shadow: 0 22px 60px rgb(44 44 42 / .24);
+}
+
+.delete-dialog::backdrop {
+  background: rgb(44 44 42 / .24);
+}
+
+.delete-dialog form {
+  padding: 20px;
+}
+
+.delete-dialog h2 {
+  margin: 0 0 10px;
+  font-family: var(--serif);
+  font-size: 17px;
+}
+
+.delete-dialog p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.dialog-actions button {
+  padding: 7px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.delete-confirm {
+  border: 0;
+  background: #8d3d31;
+  color: white;
+}
+
+.delete-cancel {
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--text);
 }

@@ -81,7 +81,7 @@ export function toPdfRect(b: EngineBox, pageHeightPt: number): PdfRect {
 
 /**
  * 엔진 결과 → FigureEntry 변환.
- * captionAnchor(S_p 오프셋)와 doc(fingerprint)은 호출 측(text-index를 가진 쪽)이 채운다:
+ * captionAnchor(S_p 오프셋)와 doc(Margin node UUID)은 호출 측(text-index를 가진 쪽)이 채운다:
  * captionText를 해당 페이지 S_p에서 검색하면 오프셋을 얻을 수 있다.
  */
 export type FigureSeed = Omit<FigureEntry, "doc" | "captionAnchor">;

@@ -65,7 +65,7 @@ viewer.html?file=<원본 URL>          hub.html (별도 탭)
 1. **자동 리다이렉트(주 경로)**: 서비스 워커가 설치 시 DNR 동적 규칙 3개를 등록한다 — (a) `^https://arxiv\.org/pdf/…` 형태의 arXiv PDF URL, (b) `\.pdf`로 끝나는 http(s) URL, (c) `^file://.*\.pdf$` 로컬 PDF URL. 규칙 (c)는 Chrome 확장 세부정보의 "파일 URL에 대한 액세스 허용"이 켜져 있을 때 커밋 전에 동작하며 Windows UNC(`file://server/share/x.pdf`)도 포함한다. 이 자동 동작은 사용자가 토글로 끌 수 있다(§9 자동 열기 토글) — 끄면 PDF가 크롬 내장 뷰어로 열리고 경로 2만 사용된다.
 2. **툴바 버튼(폴백)**: 임의 URL(확장자 없는 PDF 등)에서 확장 아이콘 클릭 → 확장자가 명확하거나 GET+헤더 판별로 PDF임이 확인되면 현재 탭을 `viewer.html?file=<url>`로 전환한다. 확정 비PDF는 제자리 토스트, 판별 실패는 낙관적으로 뷰어 전환한다.
 3. **뷰어 내 열기**: viewer.html을 file 파라미터 없이 열면 빈 상태 화면(파일 선택 버튼 + 드래그&드롭). `file:` PDF는 "파일 URL 접근 허용" 안내를 함께 표시.
-4. **허브 딥링크**: `viewer.html?file=<url>&anno=<id>` 또는 `&fig=<id>` — 로드 완료 후 해당 주석/그림으로 스크롤 + 플래시. 문서가 URL 없이 저장된 경우(로컬 파일) 허브는 "파일 다시 선택" 흐름으로 유도하고 fingerprint 일치를 검증한다.
+4. **허브 딥링크**: `viewer.html?file=<url>&anno=<id>` 또는 `&fig=<id>` — 로드 완료 후 해당 주석/그림으로 스크롤 + 플래시. 문서 재방문은 URL/경로/FSA handle locator로 판정하고, locator가 없으면 강한 콘텐츠 증거를 후보 검색에만 사용한다.
 
 `?file=` 파싱: `location.search`에서 `file=` 이후 전체 문자열을 취해 `decodeURIComponent`(실패 시 원문 사용). 허용 스킴은 `http:` `https:` `file:` `blob:`만. 그 외는 빈 상태 화면으로.
 
@@ -80,9 +80,9 @@ viewer.html?file=<원본 URL>          hub.html (별도 탭)
 | 워커 | `pdf.worker.mjs`를 번들에 동봉, `GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(...)` | MV3는 원격 코드 금지. |
 | UI | **Vanilla TypeScript, 프레임워크 없음** | 데모가 바닐라로 충분함을 증명. 오버레이 레이어는 어차피 저수준 DOM. 패널/허브도 innerHTML 렌더 + 이벤트 위임(데모 패턴 유지). |
 | 빌드 | Vite 멀티 엔트리(viewer.html, hub.html, sw.ts) + `public/manifest.json` 정적 복사 | crxjs 등 확장 전용 플러그인은 유지보수 리스크로 기각. HMR 없이 `vite build --watch`로 충분. |
-| 저장 | `chrome.storage.local` (기본 ~10MB) | 이미지(크롭 결과)를 저장하지 않고 좌표만 저장 → 용량 문제 없음. IndexedDB 기각(YAGNI). `unlimitedStorage` 불요. |
+| 저장 | `chrome.storage.local` + FSA handle 전용 IndexedDB | 노드·주석 통·locator·다운로드 바인딩은 local, structured clone이 필요한 FSA handle만 IndexedDB. 이미지 크롭 결과는 저장하지 않는다. |
 | 테스트 | vitest (core/ 순수 모듈만) | Playwright E2E는 phase 2. |
-| 기타 라이브러리 | **없음** | 퍼지 매칭·검색·CSS 프레임워크 전부 불요. |
+| 기타 라이브러리 | `pdf-lib` 1.17.1 exact | 메모포함 PDF의 embedded attachment 주입·판독에만 사용. 퍼지 매칭·검색·CSS 프레임워크는 불요. |
 
 ---
 
@@ -96,23 +96,47 @@ viewer.html?file=<원본 URL>          hub.html (별도 탭)
 
 ### 문서 식별
 
-- `docId = pdfDocument.fingerprints[0]` (내용 기반, URL 변경·미러에도 안정). 충돌 대비로 표시용 메타에 `pageCount`를 함께 저장하되 키는 fingerprint 단독.
+- `DocId`는 PDF 콘텐츠에서 만들지 않고 Margin이 발급한 UUID다. PDF.js fingerprint는 `contentEvidence.pdfJsId`의 약한 후보 증거일 뿐 물리 파일 정체성이나 연동 관계를 정하지 않는다.
+- 열기 우선순위: locator(URL/경로/FSA handle) → `artifactId` → pending 다운로드의 전체 바이트 SHA-256 → 처음 보는 attachment adopt → 새 독립 노드. 동일 locator에서 바이트가 바뀌면 노드·통은 유지하고 콘텐츠 증거만 갱신한다.
+- 웹 URL은 scheme/host 소문자화, 기본 포트·fragment 제거, 쿼리 보존(단 `utm_*`, `fbclid`, `gclid` 제거), 쿼리 순서·리다이렉트는 그대로 둔다. 로컬 사본은 경로가 다르면 기본적으로 별도 노드다.
+- 연동은 콘텐츠 동일성의 부산물이 아니라 `syncHubId + syncState`로 명시한다. `syncing` 노드는 허브의 주석 통을 공유하고, `undecided`/`detached` 노드는 전용 통을 쓴다. 상세 정본은 [doc-identity-sync.md](doc-identity-sync.md).
 
 ### TypeScript 인터페이스 (`core/types.ts`)
 
 ```ts
-export type DocId = string;               // pdf fingerprint
+export type DocId = string;               // Margin UUID
 export type PdfRect = [number, number, number, number];
 export type PenColor = 'amber' | 'teal' | 'pink' | 'blue';
 
-export interface DocMeta {
+export type DocLocator =
+  | { kind: 'path' | 'url'; value: string }
+  | { kind: 'fsa-handle'; handleKey: string };
+
+export interface DocNode {
   id: DocId;
-  title: string;                          // pdf metadata Title 또는 1p 최대 폰트 라인, 없으면 파일명
-  url?: string;                           // 원본 URL (로컬 파일이면 없음)
+  syncHubId: DocId | null;
+  syncState: 'syncing' | 'undecided' | 'detached';
+  bucketId: string;
+  locator: DocLocator | null;
+  artifactId?: string;
+  contentEvidence: { pdfJsId: string; sha256?: string; byteLength?: number };
+  forkBaseRevisionId?: string;
+  syncHubBaselineRevisionId?: string;
+  title: string;
   pageCount: number;
   pdfjsVersion: string;
   addedAt: number;
   lastOpenedAt: number;
+  lastEditedAt: number;
+  hintShownAt?: number;
+}
+
+export interface AnnotationBucket {
+  id: string;
+  revisionId: string;
+  highlights: Highlight[];
+  memos: Memo[];
+  figures: FigureEntry[];
 }
 
 export interface Anchor {
@@ -166,15 +190,19 @@ export interface FigureEntry {
 ### chrome.storage.local 레이아웃
 
 ```text
-margin:schemaVersion            = 1
-margin:settings                 = { autoIntercept: boolean }   // 기본 true, §9 자동 열기 토글
-margin:docs                     = Record<DocId, DocMeta>
-margin:doc:<id>:highlights      = Highlight[]
-margin:doc:<id>:memos           = Memo[]
-margin:doc:<id>:figures         = FigureEntry[]     // manual 영역/사용자 수정 포함
+margin:schemaVersion            = 2
+margin:settings                 = { autoIntercept, penTheme }  // v1 초기화에서도 보존
+margin:docs                     = Record<DocId, DocNode>
+margin:group:<bucketId>         = AnnotationBucket
+margin:locators                 = Record<locatorKey, DocId>
+margin:downloadBindings         = DownloadBinding[]
+IndexedDB margin-file-handles   = { key, FileSystemHandle }[]
 ```
 
-- `core/store.ts`: get/set 래퍼 + 문서 단위 로드/세이브(디바운스 500ms) + `schemaVersion` 체크(불일치 시 마이그레이션 함수 자리만 마련, v1은 1 고정).
+- `core/store.ts`: get/set 래퍼 + bucket 단위 디바운스 저장(500ms) + schema v2 초기화. schema 없음/v1이면 `margin:docs`와 `margin:doc:*`만 1회 삭제하고 settings를 보존한다. 미래 schema는 데이터를 지우지 않고 실행을 중단한다.
+- `core/doc-identity.ts`: `IdentityProvider` 체인과 브라우저 B′ resolver. 현재 locator/FSA handle/콘텐츠 증거를 사용하며 향후 Native Companion provider를 앞에 주입할 수 있다.
+- `core/sync.ts`: 파생 노드 생성, 통 fork/union, 단일 연동 대상 선택, revision 분기검사, 해제·삭제·허브 승계, 30/90일 lazy sweep.
+- `core/pdf-embed.ts`: `margin.annotations.v1.json` attachment의 주입/판독/검증. 비압축 5 MiB·5만 항목 상한, 미래 버전 거부, 서명 감지. 표준 `/Highlight` export는 후속 범위다.
 - 스텁/역참조는 저장하지 않는다 — 항상 memos의 `links`에서 파생 계산(데모와 동일).
 - 언급(mentions)·자동 감지 결과 중 region이 auto인 것은 **캐시로만** 취급: 저장하되 pdfjsVersion이 바뀌면 재계산한다. manual region은 항상 보존.
 
@@ -204,7 +232,7 @@ onMouseUp:
 
 ### 로드 시 재앵커
 
-1. `DocMeta.pdfjsVersion`이 현재와 같고 `S_p.slice(start,end) === quote`면 그대로 사용(quads 저장분 사용, 재계산 없음).
+1. `DocNode.pdfjsVersion`이 현재와 같고 `S_p.slice(start,end) === quote`면 그대로 사용(quads 저장분 사용, 재계산 없음).
 2. 불일치 시: `S_p`에서 `quote` 전체 문자열 검색. 다중 매치면 prefix 일치 길이가 가장 긴 후보 채택. 성공 시 오프셋 갱신 + quads 재계산(해당 페이지 텍스트 레이어에서 Range 재구성). 실패 시 하이라이트를 "위치 유실" 상태로 표시(메모 탭 카드에 배지, 본문 렌더 생략) — 삭제는 사용자 몫.
 3. 퍼지 매칭(레벤슈타인 등)은 구현하지 않는다(YAGNI, phase 2).
 
@@ -309,7 +337,8 @@ renderRegion(pdfDoc, page, rectPdf, maxCssWidth): HTMLCanvasElement
     "contextMenus",
     "scripting",
     "webNavigation",
-    "notifications"
+    "notifications",
+    "downloads"
   ],
   "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
   "web_accessible_resources": [
@@ -382,10 +411,13 @@ chrome.action.onClicked.addListener(routeActionClick);
 margin/
 ├─ public/manifest.json, icons/
 ├─ src/
-│  ├─ sw.ts                    # DNR 동적 규칙, action 폴백, 컨텍스트 메뉴(허브)
+│  ├─ sw.ts                    # DNR/action + downloads 완료 경로 바인딩
 │  ├─ core/
 │  │  ├─ types.ts              # §3 인터페이스
 │  │  ├─ store.ts              # storage 래퍼, 디바운스 저장, 스키마 버전
+│  │  ├─ doc-identity.ts       # locator 정규화, IdentityProvider, B′ resolver, FSA handle
+│  │  ├─ sync.ts               # 연동 가족 상태 머신, fork/union, 삭제·lazy sweep
+│  │  ├─ pdf-embed.ts          # Margin attachment 주입·판독·검증
 │  │  ├─ text-index.ts         # S_p 캐시, 오프셋↔DOM 매핑
 │  │  ├─ anchor.ts             # 선택→Anchor, 재앵커, quads 계산
 │  │  ├─ fig-extract.js        # [vendored] figure 캡션·영역 감지 엔진 (수정 금지, §5.1–5.3 대체)
@@ -441,9 +473,16 @@ margin/
 - [ ] "PDF 자동으로 Margin에서 열기"를 끄면 같은 URL이 크롬 내장 뷰어로 열리고, 확장 아이콘 클릭으로만 Margin이 열린다. 다시 켜면 자동 열기 복귀, 설정은 브라우저 재시작 후에도 유지.
 - [ ] file: PDF 열기 안내, Esc·포커스 링·키보드 탭 이동 등 접근성 기본, 콘솔 에러 0.
 
+**W-33 — 문서 정체성·연동 가족 v1**
+- [x] schema v2 초기화, UUID 노드·bucket 저장, locator/다운로드 바인딩, URL 정규화와 W-33 동일 바이트 사본 회귀 테스트.
+- [x] 파일만 저장/메모와 함께 저장/허브 복제 전이, 단일 대상 연동·충돌·해제, 삭제 허브 승계와 lazy sweep.
+- [x] Margin attachment 무손실 왕복·단일 교체·크기/스키마/미래 버전 거부·서명 경고, downloads 완료 경로 바인딩.
+- [x] 뷰어/허브 상태 알약, 저장 분할 메뉴, 첫 오픈 힌트·대상 표시·단방향 충돌 문구·스냅샷 안내·삭제 확인.
+- [ ] unpacked extension에서 [w33-ui-spec.md](w33-ui-spec.md) F1–F4와 [doc-identity-sync.md](doc-identity-sync.md) §7 시나리오 수동 QA. 표준 하이라이트 export(T5)는 후속.
+
 ## 12. 비목표 (v1에서 구현 금지) / phase 2 백로그
 
-- 구현 금지: 클라우드 동기화·계정, 스캔 PDF/OCR(텍스트 레이어 없는 페이지는 "하이라이트 불가" 배너만), PDF 파일에 주석 굽기/내보내기, 다크 모드, 다국어, 협업, 크로스 페이지 하이라이트, "Figures 2 and 3" 다중 번호 파싱, 퍼지 재앵커, 헤딩 휴리스틱 목차, 옵시디언 실시간 연동.
+- 구현 금지: 클라우드 동기화·계정, 스캔 PDF/OCR(텍스트 레이어 없는 페이지는 "하이라이트 불가" 배너만), 표준 PDF `/Highlight` 내보내기(T5), 다크 모드, 다국어, 협업, 크로스 페이지 하이라이트, "Figures 2 and 3" 다중 번호 파싱, 퍼지 재앵커, 헤딩 휴리스틱 목차, 옵시디언 실시간 연동.
 - phase 2 백로그(순서 제안): 문서/전체 마크다운 내보내기(옵시디언 호환, 딥링크 URL 포함) → getOperatorList 기반 그림 bbox 정밀화 → 수동 "새 그림 추가" → 허브 썸네일 → webRequest 관찰 기반 content-type 감지 → Playwright E2E.
 
 ## 13. 리스크와 대응
@@ -453,7 +492,7 @@ margin/
 - MV3에서 content-type만으로 오는 PDF 미인터셉트 → 툴바 버튼 폴백 + 백로그의 webRequest 관찰 방식.
 - arXiv URL이 `.pdf`로 끝나지 않음 → 전용 regex 규칙 1로 해결(§9).
 - 대용량 PDF 메모리 → PDFViewer 기본 가상화에 맡기고, render-region 캐시는 LRU 3장 고정.
-- fingerprint 충돌(이론상) → 표시 메타로 pageCount 대조, v1에서는 추가 조치 없음.
+- 동일 fingerprint/동일 SHA-256 사본 → 콘텐츠 증거를 정체성으로 쓰지 않고 locator·download ID·artifactId를 우선한다. 모호한 다중 후보는 자동 선택하지 않는다.
 
 ## 14. 수동 QA 시나리오
 
@@ -466,4 +505,6 @@ margin/
 5. 감지 실패 또는 낮은 confidence 그림에서 [영역 지정] → 드래그 → 패널 미리보기 → 저장(R8). Esc 취소 경로 확인(R9). 새로고침 후 유지.
 6. 핀 해제 후 언급 항목 클릭 → 점프와 함께 패널 자동 닫힘, 엣지 스트립으로 재오픈(R5).
 7. 허브: 태그 칩·검색·스텁 역참조 확인, "PDF에서 이 위치 열기" → 뷰어 딥링크 점프(R12). 메모 삭제 시 하이라이트 동반 삭제(R4).
-8. B로 1–7 반복(hyperref 인터셉트 포함). C를 뷰어 빈 상태에서 파일 선택으로 열고 하이라이트 저장 → 재선택 시 fingerprint로 복원 확인.
+8. B로 1–7 반복(hyperref 인터셉트 포함). C를 뷰어 빈 상태에서 파일 선택으로 열고 하이라이트 저장 → 재선택 시 FSA handle 또는 유일 콘텐츠 후보로 같은 노드가 복원되는지 확인.
+9. B를 "PDF만 저장"으로 두 번 저장해 서로 다른 경로로 연 뒤 한 사본에 메모를 추가한다. 원본·다른 사본 통에는 쓰이지 않고, 연동은 최근 대상 하나에만 적용되는지 확인.
+10. "메모와 함께 저장" 파일을 새 위치에서 열어 주석이 복원되고 자동 연동 배지가 보이는지, 이후 메모는 파일에 자동 반영되지 않는다는 안내가 나오는지 확인.

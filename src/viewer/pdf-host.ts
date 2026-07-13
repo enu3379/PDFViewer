@@ -12,7 +12,6 @@ import {
 } from 'pdfjs-dist/web/pdf_viewer.mjs';
 import type { PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api';
 import type { PageViewport } from 'pdfjs-dist/types/src/display/display_utils';
-import type { DocId, DocMeta } from '../core/types';
 
 GlobalWorkerOptions.workerSrc = workerSrc;
 
@@ -157,24 +156,30 @@ export class PdfHost {
     }
   }
 
-  async getDocMeta(titleFallback: string, url?: string): Promise<DocMeta> {
+  async getDocumentInfo(titleFallback: string): Promise<{
+    title: string;
+    pageCount: number;
+    pdfjsVersion: string;
+    pdfJsId: string;
+  }> {
     if (!this.#doc) throw new Error('PDF document is not loaded.');
-    const now = Date.now();
     return {
-      id: this.docId,
       title: await this.getTitle(titleFallback),
-      url,
       pageCount: this.#doc.numPages,
       pdfjsVersion,
-      addedAt: now,
-      lastOpenedAt: now
+      pdfJsId: this.pdfJsId
     };
   }
 
-  get docId(): DocId {
+  get pdfJsId(): string {
     const fingerprint = this.#doc?.fingerprints[0];
     if (!fingerprint) throw new Error('PDF fingerprint is unavailable.');
     return fingerprint;
+  }
+
+  async getBytes(): Promise<Uint8Array> {
+    if (!this.#doc) throw new Error('PDF document is not loaded.');
+    return new Uint8Array(await this.#doc.getData());
   }
 
   getPageDiv(pageNumber: number): HTMLElement | null {

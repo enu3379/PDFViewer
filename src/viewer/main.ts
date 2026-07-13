@@ -3,10 +3,20 @@ import './viewer.css';
 import { createAnchorFromRange, repairAnchor } from '../core/anchor';
 import { FigExtract, toFigureEntries, type FigureSeed } from '../core/fig-engine';
 import { findCaptionAnchor, mergeFigureEntries } from '../core/figures';
+import {
+  DocumentIdentityResolver,
+  FileHandleRegistry,
+  type FileSystemHandleLike,
+  fileUrlFromPath,
+  locatorFromUrl,
+  normalizeLocalPath,
+  sha256Hex
+} from '../core/doc-identity';
 import { escapeHtml, parseLinks, parseTags } from '../core/format';
 import { figureMentions, injectFigureReferenceLinks, nearestFigureMention, scanFigureReferences, updateReferenceLinkActive, type FigureReference } from '../core/mentions';
 import { isFileUrl, parseViewableUrl } from '../core/pdf-url';
 import { renderRegionDataURL } from '../core/render-region';
+import { embedMarginAttachment, hasPdfSignature, readMarginAttachment } from '../core/pdf-embed';
 import {
   DEFAULT_PEN_THEME,
   isPenTheme,
@@ -16,8 +26,18 @@ import {
   type PenTheme
 } from '../core/pen-theme';
 import { makeId, MarginStore, type DocData } from '../core/store';
+import {
+  applySync,
+  assessSync,
+  createDerivedNode,
+  createDownloadBinding,
+  deleteNode,
+  detachNode,
+  selectSyncTarget,
+  sweepIdentityState
+} from '../core/sync';
 import { buildPageTextIndex, rangeFromOffsets, type PageTextIndex } from '../core/text-index';
-import type { FigureEntry, Highlight, Memo, PenColor, PdfRect } from '../core/types';
+import type { FigureEntry, Highlight, IdentityState, Memo, PenColor, PdfRect } from '../core/types';
 import { CropMode, type CropRegion } from './crop-mode';
 import { jumpToRegion, jumpToText, type JumpAccess } from './jump';
 import { HighlightOverlay } from './overlay-highlights';
@@ -121,6 +141,8 @@ function showOnly(section: HTMLElement | null): void {
 function setLoading(label: string): void {
   if (pendingUrl) pendingUrl.textContent = label;
   downloadButton.disabled = true;
+  downloadMenuButton.disabled = true;
+  syncButton.disabled = true;
   showOnly(pendingState);
 }
 
@@ -128,6 +150,57 @@ function setError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   if (errorMessage) errorMessage.textContent = message;
   showOnly(errorState);
+}
+
+let toastTimer: number | undefined;
+
+function showToast(
+  message: string,
+  actionLabel?: string,
+  onAction?: () => void,
+  duration = 4200
+): void {
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+  toastMessage.textContent = message;
+  toastAction.hidden = !actionLabel;
+  toastAction.textContent = actionLabel ?? '';
+  toastAction.onclick = actionLabel && onAction
+    ? () => {
+      toast.hidden = true;
+      onAction();
+    }
+    : null;
+  toast.hidden = false;
+  toastTimer = window.setTimeout(() => {
+    toast.hidden = true;
+    toastTimer = undefined;
+  }, duration);
+}
+
+type ConfirmOptions = {
+  title: string;
+  message: string;
+  acceptLabel: string;
+};
+
+function showConfirm(options: ConfirmOptions): Promise<boolean> {
+  if (confirmDialog.open) confirmDialog.close('cancel');
+  confirmTitle.textContent = options.title;
+  confirmMessage.textContent = options.message;
+  confirmAccept.textContent = options.acceptLabel;
+  confirmDialog.returnValue = 'cancel';
+  confirmDialog.showModal();
+  window.queueMicrotask(() => confirmCancel.focus());
+  return new Promise((resolve) => {
+    confirmDialog.addEventListener('close', () => {
+      resolve(confirmDialog.returnValue === 'accept');
+    }, { once: true });
+  });
+}
+
+function closeDownloadMenu(): void {
+  downloadMenu.hidden = true;
+  downloadMenuButton.setAttribute('aria-expanded', 'false');
 }
 
 function showFileAccessState(): void {
@@ -151,25 +224,118 @@ async function openFileAccessSettings(): Promise<void> {
   }
 }
 
-function openFilePicker(): void {
+type FilePickerHandle = FileSystemHandleLike & { getFile(): Promise<File> };
+
+async function openFilePicker(): Promise<void> {
+  const picker = (window as typeof window & {
+    showOpenFilePicker?: (options: { types: Array<{ description: string; accept: Record<string, string[]> }> })
+      => Promise<FilePickerHandle[]>;
+  }).showOpenFilePicker;
+  if (picker) {
+    try {
+      const [handle] = await picker.call(window, {
+        types: [{ description: 'PDF 문서', accept: { 'application/pdf': ['.pdf'] } }]
+      });
+      if (handle) await loadSelectedFile(await handle.getFile(), handle);
+      return;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      // API가 비활성화된 환경이면 기존 input으로 조용히 폴백한다.
+    }
+  }
   fileInput.value = '';
   fileInput.click();
 }
 
 let downloadName = 'document.pdf';
 
-async function downloadCurrentPdf(): Promise<void> {
-  const doc = host.pdfDocument;
-  if (!doc || downloadButton.disabled) return;
-  const data = await doc.getData();
-  // getData()의 Uint8Array<ArrayBufferLike>는 BlobPart와 타입이 안 맞아 ArrayBuffer 사본으로 감싼다.
-  const blob = new Blob([new Uint8Array(data)], { type: 'application/pdf' });
+async function startPdfDownload(bytes: Uint8Array, name: string, bindingId: string): Promise<boolean> {
+  const blob = new Blob([new Uint8Array(bytes)], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = downloadName;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try {
+    if (typeof chrome !== 'undefined' && chrome.downloads?.download) {
+      const downloadId = await chrome.downloads.download({ url, filename: name, saveAs: true });
+      await store.setDownloadId(bindingId, downloadId);
+      const [item] = await chrome.downloads.search({ id: downloadId });
+      if (item?.state === 'complete' && item.filename) {
+        await store.completeDownloadBinding(downloadId, normalizeLocalPath(item.filename));
+        return true;
+      }
+      return false;
+    }
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    return false;
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+}
+
+async function downloadCurrentPdf(kind: 'file-only' | 'memo-with'): Promise<void> {
+  const current = docData;
+  if (!host.pdfDocument || !current || downloadButton.disabled) return;
+  closeDownloadMenu();
+  await store.flushDoc(current);
+
+  const sourceBytes = await host.getBytes();
+  const sourceSha = await sha256Hex(sourceBytes);
+  let outputBytes = sourceBytes;
+  let artifactId: string | undefined;
+  if (kind === 'memo-with') {
+    if (await hasPdfSignature(sourceBytes)) {
+      const proceed = await showConfirm({
+        title: '서명된 PDF입니다',
+        message: '서명된 PDF입니다 — 메모를 파일에 담으면 서명이 무효화됩니다.',
+        acceptLabel: '계속 저장'
+      });
+      if (!proceed) return;
+    }
+    const embedded = await embedMarginAttachment(sourceBytes, current.bucket, {
+      pageCount: current.meta.pageCount
+    });
+    outputBytes = embedded.bytes;
+    artifactId = embedded.attachment.artifactId;
+  }
+
+  const outputSha = kind === 'file-only' ? sourceSha : await sha256Hex(outputBytes);
+  const derived = createDerivedNode(
+    sweepIdentityState(await store.loadIdentityState()),
+    current.meta.id,
+    kind,
+    {
+      artifactId,
+      contentEvidence: {
+        pdfJsId: current.meta.contentEvidence.pdfJsId,
+        sha256: outputSha,
+        byteLength: outputBytes.byteLength,
+        fileName: downloadName
+      }
+    }
+  );
+  const binding = createDownloadBinding(derived.node.id, outputSha);
+  binding.kind = kind;
+  derived.state.downloadBindings.push(binding);
+  await store.saveIdentityState(derived.state);
+  try {
+    const completedImmediately = await startPdfDownload(outputBytes, downloadName, binding.id);
+    if (completedImmediately && kind === 'memo-with') {
+      showToast('저장 시점의 메모가 담겼습니다 — 이후의 메모는 파일에 자동 반영되지 않아요.');
+    }
+  } catch (error) {
+    binding.status = 'interrupted';
+    await store.upsertDownloadBinding(binding);
+    let failedState = await store.loadIdentityState();
+    const failedNode = failedState.nodes[derived.node.id];
+    if (failedNode && !failedNode.locator) {
+      failedState = deleteNode(failedState, failedNode.id);
+      await store.saveIdentityState(failedState);
+    }
+    if (!(error instanceof Error && /cancel/i.test(error.message))) {
+      showToast(error instanceof Error ? error.message : String(error));
+    }
+  }
 }
 
 function flashElement(el: HTMLElement): void {
@@ -238,6 +404,99 @@ function syncAnnotationViews(): void {
   memoTab.setData(docData.highlights, docData.memos, lostHighlights, currentPen);
 }
 
+function renderSyncUi(state: IdentityState): void {
+  const node = docData ? state.nodes[docData.meta.id] : undefined;
+  syncBadge.hidden = !node || node.syncState === 'detached';
+  syncBadge.classList.remove('is-syncing', 'is-undecided');
+  if (node?.syncState === 'syncing') {
+    syncBadge.classList.add('is-syncing');
+    syncBadgeLabel.textContent = '연동중';
+  } else if (node?.syncState === 'undecided') {
+    syncBadge.classList.add('is-undecided');
+    syncBadgeLabel.textContent = '미결정';
+  }
+
+  if (!node) {
+    syncButton.disabled = true;
+    syncButton.title = '연동할 사본이 없습니다';
+    syncButton.classList.remove('has-attention');
+    return;
+  }
+  if (node.syncState === 'syncing') {
+    syncButton.disabled = false;
+    syncButton.title = '연동 해제';
+    syncBadge.title = '연동 해제';
+    syncButton.classList.remove('has-attention');
+    return;
+  }
+  const selection = selectSyncTarget(state, node.id);
+  syncButton.disabled = !selection;
+  syncButton.classList.toggle('has-attention', Boolean(selection));
+  const title = selection ? `'${selection.target.title}'과 연동` : '연동할 사본이 없습니다';
+  syncButton.title = title;
+  syncBadge.title = title;
+}
+
+async function reloadCurrentDocFromState(state: IdentityState): Promise<void> {
+  if (!docData) return;
+  const node = state.nodes[docData.meta.id];
+  if (!node) return;
+  currentIdentityState = state;
+  docData = await store.loadDoc(node);
+  syncAnnotationViews();
+  figuresTab.setDocument(docData.figures);
+  void refreshFigureReferences();
+  renderSyncUi(state);
+}
+
+async function maybeShowUndecidedHint(state: IdentityState): Promise<void> {
+  if (!docData || docData.meta.syncState !== 'undecided' || docData.meta.hintShownAt) return;
+  const hub = docData.meta.syncHubId ? state.nodes[docData.meta.syncHubId] : undefined;
+  if (!hub) return;
+  showToast(
+    `'${hub.title}'의 사본입니다 — 메모를 같이 쓰려면 [연동]을 누르세요.`,
+    '연동',
+    () => { void handleSyncAction(); },
+    5000
+  );
+  docData.meta.hintShownAt = Date.now();
+  state.nodes[docData.meta.id] = docData.meta;
+  await store.saveNode(docData.meta);
+}
+
+async function handleSyncAction(): Promise<void> {
+  if (!docData || syncButton.disabled) return;
+  await store.flushDoc(docData);
+  let state = sweepIdentityState(await store.loadIdentityState());
+  const current = state.nodes[docData.meta.id];
+  if (!current) return;
+
+  if (current.syncState === 'syncing') {
+    state = detachNode(state, current.id);
+    await store.saveIdentityState(state);
+    await reloadCurrentDocFromState(state);
+    showToast('이제 이 문서의 메모는 따로 움직입니다.');
+    return;
+  }
+
+  const assessment = assessSync(state, current.id);
+  if (!assessment) return;
+  let overwriteConflict = false;
+  if (assessment.conflict) {
+    overwriteConflict = await showConfirm({
+      title: '양쪽에 서로 다른 메모가 있습니다',
+      message: `'${assessment.target.title}'과 이 문서가 각자 수정되었습니다. 지금 연동하면 현재 문서의 메모로 덮어씁니다.\n다른 사본의 메모를 남기려면 취소하고, 그 문서를 열어 연동하세요.`,
+      acceptLabel: '현재 것으로 덮어쓰기'
+    });
+    if (!overwriteConflict) return;
+  }
+  const applied = applySync(state, current.id, { overwriteConflict });
+  if (applied.status !== 'synced') return;
+  await store.saveIdentityState(applied.state);
+  await reloadCurrentDocFromState(applied.state);
+  showToast(`'${assessment.target.title}'과 연동됐습니다 — 메모가 함께 움직입니다.`);
+}
+
 function scheduleDocSave(): void {
   if (docData) store.scheduleSaveDoc(docData);
 }
@@ -246,9 +505,42 @@ function flushDocSave(): void {
   if (docData) void store.flushDoc(docData);
 }
 
-async function initializeDoc(titleFallback: string, url?: string): Promise<void> {
-  const meta = await host.getDocMeta(titleFallback, url);
-  docData = await store.loadDoc(meta);
+type OpenIdentitySource = {
+  url?: string;
+  file?: File;
+  handle?: FileSystemHandleLike;
+};
+
+async function initializeDoc(titleFallback: string, source: OpenIdentitySource = {}): Promise<void> {
+  const info = await host.getDocumentInfo(titleFallback);
+  const bytes = await host.getBytes();
+  const embedded = await readMarginAttachment(bytes);
+  const locator = source.url
+    ? locatorFromUrl(source.url)
+    : source.handle
+      ? await fileHandleRegistry.resolve(source.handle)
+      : null;
+  const initialState = sweepIdentityState(await store.loadIdentityState());
+  const identity = await identityResolver.resolve(
+    {
+      locator,
+      title: info.title,
+      pageCount: info.pageCount,
+      pdfjsVersion: info.pdfjsVersion,
+      evidence: {
+        pdfJsId: info.pdfJsId,
+        byteLength: bytes.byteLength,
+        fileName: source.file?.name,
+        lastModified: source.file?.lastModified
+      },
+      attachment: embedded.attachment,
+      getSha256: async () => sha256Hex(bytes)
+    },
+    initialState
+  );
+  await store.saveIdentityState(identity.state);
+  currentIdentityState = identity.state;
+  docData = await store.loadDoc(identity.node);
   pageIndexes.clear();
   pageScanIndexes.clear();
   figureReferences = [];
@@ -264,6 +556,8 @@ async function initializeDoc(titleFallback: string, url?: string): Promise<void>
   cropMode.cancel(false);
   void refreshFigureReferences();
   figuresTab.ensureScanned();
+  renderSyncUi(identity.state);
+  await maybeShowUndecidedHint(identity.state);
 }
 
 function markTocForPage(page: number): void {
@@ -288,10 +582,11 @@ async function loadUrl(file: string): Promise<void> {
   }
   try {
     await host.loadUrl(file);
-    await initializeDoc(basenameFromUrl(file), file);
+    await initializeDoc(basenameFromUrl(file), { url: file });
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(basenameFromUrl(file));
     downloadButton.disabled = false;
+    downloadMenuButton.disabled = false;
     showOnly(readRow);
     host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
@@ -306,16 +601,17 @@ async function loadUrl(file: string): Promise<void> {
   }
 }
 
-async function loadSelectedFile(file: File): Promise<void> {
+async function loadSelectedFile(file: File, handle?: FileSystemHandleLike): Promise<void> {
   setLoading(file.name);
   figuresTab.setDocument([]);
   if (fileLabel) fileLabel.textContent = file.name;
   try {
     await host.loadFile(file);
-    await initializeDoc(file.name);
+    await initializeDoc(file.name, { file, handle });
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(file.name);
     downloadButton.disabled = false;
+    downloadMenuButton.disabled = false;
     showOnly(readRow);
     host.refreshLayoutSoon();
     setPageUi(host.currentPage, host.pageCount);
@@ -803,7 +1099,6 @@ function jumpToFigure(figId: string): void {
   } else {
     host.setPage(figure.page);
   }
-  if (!pinned) closePanel();
 }
 
 function jumpToFigureMention(refKey: string): void {
@@ -928,7 +1223,23 @@ function setupFileDrop(): void {
       setError(new Error('PDF 파일만 열 수 있습니다.'));
       return;
     }
-    void loadSelectedFile(pdf);
+    const item = Array.from(event.dataTransfer?.items ?? []).find(
+      (candidate) => {
+        const file = candidate.kind === 'file' ? candidate.getAsFile() : null;
+        return Boolean(file && isPdfFile(file));
+      }
+    ) as (DataTransferItem & {
+      getAsFileSystemHandle?: () => Promise<FileSystemHandleLike | null>;
+    }) | undefined;
+    void (async () => {
+      let handle: FileSystemHandleLike | undefined;
+      try {
+        handle = (await item?.getAsFileSystemHandle?.()) ?? undefined;
+      } catch {
+        // handle을 얻지 못하면 콘텐츠 증거 resolver로 폴백한다.
+      }
+      await loadSelectedFile(pdf, handle);
+    })();
   });
 }
 
@@ -1059,13 +1370,21 @@ const readRow = requireElement<HTMLElement>('#readRow');
 const fileLabel = requireElement<HTMLElement>('#fileLabel');
 const pendingUrl = requireElement<HTMLElement>('#pendingUrl');
 const errorMessage = requireElement<HTMLElement>('#errorMessage');
+const syncBadge = requireElement<HTMLButtonElement>('#syncBadge');
+const syncBadgeLabel = requireElement<HTMLElement>('#syncBadgeLabel');
+const syncButton = requireElement<HTMLButtonElement>('#syncButton');
 const downloadButton = requireElement<HTMLButtonElement>('#downloadButton');
+const downloadMenuButton = requireElement<HTMLButtonElement>('#downloadMenuButton');
+const downloadMenu = requireElement<HTMLElement>('#downloadMenu');
+const downloadPdfOnly = requireElement<HTMLButtonElement>('#downloadPdfOnly');
+const downloadWithMemos = requireElement<HTMLButtonElement>('#downloadWithMemos');
 const fileAccessSettings = requireElement<HTMLButtonElement>('#fileAccessSettings');
 const fileAccessPickFile = requireElement<HTMLButtonElement>('#fileAccessPickFile');
 const fileAccessSettingsFallback = requireElement<HTMLElement>('#fileAccessSettingsFallback');
 const missingFilePickFile = requireElement<HTMLButtonElement>('#missingFilePickFile');
 const missingFileUrl = requireElement<HTMLElement>('#missingFileUrl');
 const hubButton = requireElement<HTMLButtonElement>('#hubButton');
+const filePickButton = requireElement<HTMLButtonElement>('#filePickButton');
 const fileInput = requireElement<HTMLInputElement>('#fileInput');
 const viewerContainer = requireElement<HTMLDivElement>('#viewerContainer');
 const viewerElement = requireElement<HTMLDivElement>('#viewer');
@@ -1091,12 +1410,34 @@ const memoSearch = requireElement<HTMLInputElement>('#memoSearch');
 const memoCount = requireElement<HTMLElement>('#memoCount');
 const memoTabN = requireElement<HTMLElement>('#memoTabN');
 const memoList = requireElement<HTMLElement>('#memoList');
+const toast = requireElement<HTMLElement>('#toast');
+const toastMessage = requireElement<HTMLElement>('#toastMessage');
+const toastAction = requireElement<HTMLButtonElement>('#toastAction');
+const confirmDialog = requireElement<HTMLDialogElement>('#confirmDialog');
+const confirmTitle = requireElement<HTMLElement>('#confirmTitle');
+const confirmMessage = requireElement<HTMLElement>('#confirmMessage');
+const confirmAccept = requireElement<HTMLButtonElement>('#confirmAccept');
+const confirmCancel = requireElement<HTMLButtonElement>('#confirmCancel');
 
 let outlineItems: FlatOutlineItem[] = [];
 let pinned = true;
 let currentPen: PenColor = 'amber';
 let docData: DocData | null = null;
+let currentIdentityState: IdentityState | null = null;
 const store = new MarginStore();
+const fileHandleRegistry = new FileHandleRegistry();
+const identityResolver = new DocumentIdentityResolver([], {
+  locatorExists: async (locator) => {
+    if (locator.kind !== 'path') return true;
+    try {
+      const response = await fetch(fileUrlFromPath(locator.value), { method: 'GET' });
+      await response.body?.cancel();
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+});
 const pageIndexes = new Map<number, PageTextIndex>();
 const pageScanIndexes = new Map<number, TextScanIndex>();
 const lostHighlights = new Set<string>();
@@ -1203,6 +1544,15 @@ setupPanelResize();
 setupFileDrop();
 syncAnnotationViews();
 
+if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener((message: unknown) => {
+    const event = message as { type?: unknown; kind?: unknown };
+    if (event.type === 'margin:download-complete' && event.kind === 'memo-with') {
+      showToast('저장 시점의 메모가 담겼습니다 — 이후의 메모는 파일에 자동 반영되지 않아요.');
+    }
+  });
+}
+
 host.eventBus.on('textlayerrendered', (event: { pageNumber: number }) => {
   handleTextLayerRendered(event.pageNumber);
 });
@@ -1216,7 +1566,30 @@ hubButton.addEventListener('click', () => {
 });
 
 downloadButton.addEventListener('click', () => {
-  void downloadCurrentPdf();
+  void downloadCurrentPdf('file-only');
+});
+
+downloadMenuButton.addEventListener('click', (event) => {
+  event.stopPropagation();
+  const opening = downloadMenu.hidden;
+  downloadMenu.hidden = !opening;
+  downloadMenuButton.setAttribute('aria-expanded', String(opening));
+  if (opening) downloadPdfOnly.focus();
+});
+
+downloadPdfOnly.addEventListener('click', () => {
+  void downloadCurrentPdf('file-only');
+});
+
+downloadWithMemos.addEventListener('click', () => {
+  void downloadCurrentPdf('memo-with');
+});
+
+syncButton.addEventListener('click', () => { void handleSyncAction(); });
+syncBadge.addEventListener('click', () => { void handleSyncAction(); });
+
+document.addEventListener('click', (event) => {
+  if (!(event.target as Element).closest('#downloadSplit')) closeDownloadMenu();
 });
 
 fileAccessSettings.addEventListener('click', () => {
@@ -1225,6 +1598,7 @@ fileAccessSettings.addEventListener('click', () => {
 
 fileAccessPickFile.addEventListener('click', openFilePicker);
 missingFilePickFile.addEventListener('click', openFilePicker);
+filePickButton.addEventListener('click', openFilePicker);
 
 fileInput.addEventListener('change', () => {
   const [file] = Array.from(fileInput.files ?? []);
@@ -1281,7 +1655,7 @@ window.addEventListener('keydown', (event) => {
   // 내장 뷰어의 저장 단축키 대체 — 브라우저 "페이지 저장" 대화상자를 막는다.
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's') {
     event.preventDefault();
-    void downloadCurrentPdf();
+    void downloadCurrentPdf('file-only');
   }
 });
 

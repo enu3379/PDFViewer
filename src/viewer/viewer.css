@@ -161,6 +161,51 @@ textarea {
   white-space: nowrap;
 }
 
+.sync-badge {
+  height: 19px;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}
+
+.sync-badge .d {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.sync-badge.is-syncing {
+  background: var(--accent-wash);
+  color: var(--accent-deep);
+}
+
+.sync-badge.is-syncing .d {
+  background: var(--accent);
+}
+
+.sync-badge.is-undecided {
+  border: 1.4px dashed var(--line);
+  color: var(--muted);
+}
+
+.sync-badge.is-undecided .d {
+  width: 5px;
+  height: 5px;
+  border: 1.4px solid var(--soft);
+  background: transparent;
+}
+
 .toolbar-divider {
   width: 1px;
   height: 16px;
@@ -212,6 +257,193 @@ textarea {
   cursor: default;
   color: #c6c3b6;
   background: none;
+}
+
+.sync-action {
+  position: relative;
+}
+
+.sync-action svg,
+.download-main svg,
+.download-menu svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.sync-attention {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.sync-action:not(.has-attention) .sync-attention {
+  display: none;
+}
+
+.download-split {
+  display: inline-flex;
+  flex: none;
+  align-items: stretch;
+}
+
+.download-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 7px 0 0 7px;
+}
+
+.download-caret {
+  min-width: 24px;
+  padding: 6px;
+  border-left: 1px solid var(--line-soft);
+  border-radius: 0 7px 7px 0;
+}
+
+.download-menu {
+  position: fixed;
+  z-index: 80;
+  top: 40px;
+  right: 58px;
+  width: 304px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 14px 34px rgb(44 44 42 / .16);
+}
+
+.download-menu button {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.download-menu button:hover {
+  background: rgb(44 44 42 / .06);
+}
+
+.download-menu button > span {
+  display: grid;
+  gap: 2px;
+}
+
+.download-menu strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.download-menu small {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.toast {
+  position: fixed;
+  z-index: 120;
+  left: 50%;
+  bottom: 24px;
+  display: flex;
+  max-width: min(520px, calc(100vw - 32px));
+  align-items: center;
+  gap: 10px;
+  transform: translateX(-50%);
+  padding: 10px 13px;
+  border: 1px solid rgb(255 255 255 / .12);
+  border-radius: 9px;
+  background: #27241f;
+  box-shadow: 0 14px 32px rgb(0 0 0 / .22);
+  color: #fffaf0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.toast button {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid rgb(255 250 240 / .28);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.confirm-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--panel);
+  box-shadow: 0 22px 60px rgb(44 44 42 / .24);
+  color: var(--text);
+}
+
+.confirm-dialog::backdrop {
+  background: rgb(44 44 42 / .24);
+}
+
+.confirm-dialog form {
+  padding: 20px;
+}
+
+.confirm-dialog h2 {
+  margin: 0 0 10px;
+  font-family: var(--serif);
+  font-size: 17px;
+}
+
+.confirm-dialog p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-line;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.dialog-actions button {
+  padding: 7px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.danger-button {
+  border: 0;
+  background: #8d3d31;
+  color: white;
+}
+
+.dialog-actions .secondary-button {
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--text);
 }
 
 .page-jump {

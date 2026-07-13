@@ -1,10 +1,10 @@
 # Progress Log
 
-Last updated: 2026-07-08
+Last updated: 2026-07-13
 
 ## Current State
 
-M0 and M1 are complete. The first M2 implementation pass is complete and pushed, but needs manual Chrome QA before treating M2 as accepted.
+M0 and M1 are complete. The first M2 implementation pass and W-33 identity/sync v1 implementation are complete; both still need unpacked-extension manual QA before acceptance.
 
 ## Completed
 
@@ -45,6 +45,13 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
   - PDF.js `getData()` 바이트를 blob 앵커로 저장: 재다운로드 없음(오프라인·드래그&드롭 문서도 동작), 권한 추가 없음.
   - 파일명은 원본 basename 유지(`.pdf` 보정, 금지 문자 치환), 문서 로드 전에는 버튼 비활성. Ctrl/⌘+S는 브라우저 "페이지 저장" 대화상자를 preventDefault로 대체.
   - 좁은 창에서 툴바 텍스트가 글자 단위로 꺾이던 문제 수정(nowrap + 툴바 overflow-x 스크롤).
+- 문서 정체성·연동 가족 W-33 v1 구현 (2026-07-13, T1→T4·T6→T7; T5 표준 하이라이트 export는 후속):
+  - schema v2(UUID `DocNode`, `AnnotationBucket`, locator/download binding)와 v1 문서 데이터 1회 초기화. settings 보존, 재실행 no-op, 미래 schema 보존·중단 테스트.
+  - `IdentityProvider` 기반 resolver: URL 정규화, 경로/FSA handle 우선, artifact/pending/SHA 후보 fallback, 같은 locator 갱신 유지, 동일 바이트 외부 사본 독립. W-33 회귀 테스트 포함.
+  - 연동 상태 머신: 파일만·메모포함·복제 파생, 단일 최근 대상, 두 revision 기준 충돌, 해제, 허브 삭제 승계, pending 30일/빈 독립 노드 90일 lazy sweep.
+  - `pdf-lib` Margin attachment 주입·판독: 주석 무손실 왕복, 재저장 단일 교체, 고유 artifact, 5 MiB/5만 항목/스키마/미래 버전 거부, 서명 감지.
+  - T6 UI: 점+텍스트 알약, PDF만/메모포함 저장 메뉴, 연동 힌트·대상·충돌·스냅샷 문구, 허브 복제·삭제 확인, `downloads` 완료 경로 바인딩.
+  - 자동 검증: 67 tests, typecheck, build 통과. `npm run test:smoke`는 실제 임시 PDF의 동일 바이트 2회 저장, 독립 편집→연동→해제, 메모 attachment 왕복, 이동 재바인딩, 외부 복사 독립, 충돌·허브 삭제 승계를 저장소 재로드 전후로 검증한다. 로컬 브라우저에서 arXiv PDF 로드·분할 메뉴·콘솔 오류 0 확인. 실제 unpacked MV3의 `chrome.downloads` 완료 이벤트·파일 권한·OS별 플로우는 수동 QA 필요.
 
 ## Needs QA
 
@@ -68,10 +75,11 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
   - 존재하지 않는 로컬 경로(이동/개명된 파일)가 파일 없음 상태로 도착하는지 확인.
   - (macOS) 시스템 설정에서 Chrome 알림 OFF 시 OS 알림이 조용히 누락되는 알려진 한계 확인.
   - 다운로드 항목 "시스템 뷰어로 열기"는 Margin 미개입이 정상임을 확인.
+- W-33 수동 QA: [doc-identity-sync.md](doc-identity-sync.md) §7의 6개 시나리오와 [w33-ui-spec.md](w33-ui-spec.md) F1–F4. 동일 바이트 2회 저장의 경로 고정, 외부 복사 독립, 메모 attachment 왕복, 연동 충돌·해제, 전용/공유 삭제, macOS·Windows 다운로드 완료 이벤트를 확인.
 
 ## Next
 
-- 문서 정체성·싱크 재설계 (이슈 W-33): 사본이 주석을 공유하는 근본 원인은 `DocId=pdf.js 지문`이라 사본(동일 바이트)이 같은 버킷을 공유하기 때문. 은우와 설계 합의 완료(2026-07-10) — 정체성을 지문에서 분리한 **노드 그래프 + locator 키**(감시 없이 lazy), 다운로드/복제 **4종**(파일만/메모포함=자동연동/복제=형제규칙/export=분리루트), 싱크 상태 머신(단일 대상·분기검사), 지문은 다운로드 기록 매칭 전용. 설계 정본 [doc-identity-sync.md](doc-identity-sync.md) **v2.1 완성(2026-07-13)** — 보완 3건(§4.2 URL 정규화·§4.3 locator 우선·§5.1 삭제 수명주기)과 UX 안내 4건(§10) 확정, 역할 분담 §9.1. **Codex T1~T7 착수 가능, Claude는 D1~D5(배지·아이콘 사양, UI 문구, 플로우 명세, QA 가이드) 병행.**
+- 문서 정체성·연동 재설계 (이슈 W-33): Codex 범위 T1~T4·T6·T7 구현 완료(2026-07-13), T5 표준 하이라이트 export는 v1 스콥 제외. 남은 일은 unpacked-extension 수동 QA, D4 QA 문서와 D5 정본 동기화 검수, PR #17 실제 머지 후 `dev` 기준 rebase.
 - 이슈 #1 대응: PR #5 머지 완료 (2026-07-09) — Windows 수동 QA(진형, issue-1-qa.md W-1~33)와 이슈 답변 게시·클로즈만 남음.
 - 피규어 UX 개정: G1–G8 + FG-R1(내장 링크 원점 칩) 구현 완료 (2026-07-13) — dev 리베이스(#9 "로드 즉시 스캔"을 새 아키텍처에 이식: 로드 후 자동 `ensureScanned`, 스캔 세대 가드, 문서 전환 시 저장 가드), dev 프리뷰 런타임 검증 통과. 남은 것: PR 머지, 실기기 QA([figure-ux.md](figure-ux.md) §7). 상세는 [figure-ux.md](figure-ux.md) §6.1.
 - Finish M2 manual QA fixes.

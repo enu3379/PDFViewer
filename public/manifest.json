@@ -27,7 +27,8 @@
     "contextMenus",
     "scripting",
     "webNavigation",
-    "notifications"
+    "notifications",
+    "downloads"
   ],
   "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
   "web_accessible_resources": [

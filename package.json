@@ -9,11 +9,14 @@
     "dev": "vite build --watch",
     "dev:win": "scripts\\run-node.cmd node_modules/vite/bin/vite.js build --watch",
     "test": "vitest run",
+    "test:smoke": "vitest run test/w33-smoke.test.ts",
     "test:win": "scripts\\run-node.cmd node_modules/vitest/vitest.mjs run",
+    "test:smoke:win": "scripts\\run-node.cmd node_modules/vitest/vitest.mjs run test/w33-smoke.test.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:win": "scripts\\run-node.cmd node_modules/typescript/bin/tsc --noEmit"
   },
   "dependencies": {
+    "pdf-lib": "1.17.1",
     "pdfjs-dist": "4.10.38"
   },
   "devDependencies": {

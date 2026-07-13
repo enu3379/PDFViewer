@@ -5,6 +5,8 @@ import {
   isPdfLikeUrl,
   parseViewableUrl
 } from './core/pdf-url';
+import { normalizeLocalPath } from './core/doc-identity';
+import { MarginStore } from './core/store';
 
 const VIEWER_PATH = 'viewer.html';
 const HUB_PATH = 'hub.html';
@@ -13,6 +15,7 @@ const UNSUPPORTED_NOTICE = 'Margin은 PDF 문서에서만 열 수 있어요. PDF
 const UNSUPPORTED_NOTIFICATION_TITLE = 'Margin';
 const UNSUPPORTED_NOTIFICATION_MESSAGE = 'PDF 문서에서만 열 수 있어요. PDF 탭에서 다시 눌러 주세요.';
 const ICON_128 = 'icons/icon-128.png';
+const store = new MarginStore();
 
 type Settings = {
   autoIntercept?: boolean;
@@ -280,4 +283,29 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 
   await showUnsupportedNotice(tab.id);
+});
+
+async function finalizeMarginDownload(downloadId: number): Promise<void> {
+  const [item] = await chrome.downloads.search({ id: downloadId });
+  if (!item?.filename) return;
+  const binding = await store.completeDownloadBinding(downloadId, normalizeLocalPath(item.filename));
+  if (binding?.kind === 'memo-with') {
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'margin:download-complete',
+        kind: binding.kind,
+        nodeId: binding.nodeId
+      });
+    } catch {
+      // 완료 시 뷰어 탭이 닫혀 있으면 스냅샷 안내를 전달할 대상이 없다.
+    }
+  }
+}
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (delta.state?.current === 'complete') {
+    void finalizeMarginDownload(delta.id);
+  } else if (delta.state?.current === 'interrupted') {
+    void store.interruptDownloadBinding(delta.id);
+  }
 });

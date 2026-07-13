@@ -20,6 +20,9 @@
           </svg>
         </div>
         <div id="fileLabel" class="file-label">빈 뷰어</div>
+        <button id="syncBadge" class="sync-badge" type="button" hidden>
+          <span class="d"></span><span id="syncBadgeLabel"></span>
+        </button>
         <div class="toolbar-divider"></div>
         <button id="prevPage" class="icon-button" type="button" aria-label="이전 페이지">‹</button>
         <label class="page-jump" aria-label="현재 페이지">
@@ -34,7 +37,27 @@
         <button id="zoomIn" class="icon-button" type="button" aria-label="확대">+</button>
         <button id="fitWidth" class="toolbar-button" type="button">폭 맞춤</button>
         <div class="spacer"></div>
-        <button id="downloadButton" class="toolbar-button" type="button" title="PDF 파일로 저장 (Ctrl/⌘+S)" disabled>저장</button>
+        <button id="syncButton" class="icon-button sync-action" type="button" aria-label="연동" disabled>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 0 1-9.4 3.9M2.5 8a5.5 5.5 0 0 1 9.4-3.9"/><path d="M11.5 4.5h2.9V1.6M4.5 11.5H1.6v2.9"/></svg>
+          <span class="sync-attention"></span>
+        </button>
+        <div id="downloadSplit" class="download-split">
+          <button id="downloadButton" class="toolbar-button download-main" type="button" title="PDF만 저장 (Ctrl/⌘+S)" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/><path d="M8.5 7.5v4M6.7 9.7l1.8 1.8 1.8-1.8"/></svg>
+            <span>저장</span>
+          </button>
+          <button id="downloadMenuButton" class="toolbar-button download-caret" type="button" aria-label="저장 메뉴" aria-expanded="false" disabled>⌄</button>
+          <div id="downloadMenu" class="download-menu" role="menu" hidden>
+            <button id="downloadPdfOnly" type="button" role="menuitem">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/><path d="M8.5 7.5v4M6.7 9.7l1.8 1.8 1.8-1.8"/></svg>
+              <span><strong>PDF만 저장</strong><small>파일 그대로 — 메모는 이 브라우저에 남습니다</small></span>
+            </button>
+            <button id="downloadWithMemos" type="button" role="menuitem">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/><circle cx="10.5" cy="11" r="1.8" fill="currentColor" stroke="none"/></svg>
+              <span><strong>메모와 함께 저장</strong><small>메모를 파일 안에 담습니다</small></span>
+            </button>
+          </div>
+        </div>
         <button id="hubButton" class="toolbar-button" type="button">허브</button>
       </header>
       <main class="reader-shell">
@@ -49,10 +72,8 @@
           </svg>
           <h1>PDF를 여세요</h1>
           <p>파일을 선택하거나 이 창에 PDF를 끌어놓으세요.</p>
-          <label class="file-button">
-            파일 선택
-            <input id="fileInput" type="file" accept="application/pdf,.pdf">
-          </label>
+          <button id="filePickButton" class="file-button" type="button">파일 선택</button>
+          <input id="fileInput" type="file" accept="application/pdf,.pdf" hidden>
           <p class="hint">로컬 PDF는 Chrome 확장 설정에서 파일 URL 접근 허용이 필요할 수 있습니다.</p>
         </section>
         <section id="pendingState" class="empty-state" hidden>
@@ -126,6 +147,19 @@
           <button id="edge" class="edge" type="button" hidden title="패널 열기" aria-label="패널 열기">‹</button>
         </section>
       </main>
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden>
+        <span id="toastMessage"></span><button id="toastAction" type="button" hidden></button>
+      </div>
+      <dialog id="confirmDialog" class="confirm-dialog">
+        <form method="dialog">
+          <h2 id="confirmTitle"></h2>
+          <p id="confirmMessage"></p>
+          <div class="dialog-actions">
+            <button id="confirmAccept" class="danger-button" value="accept"></button>
+            <button id="confirmCancel" class="secondary-button" value="cancel" autofocus>취소</button>
+          </div>
+        </form>
+      </dialog>
     </div>
     <script type="module" src="/src/viewer/main.ts"></script>
   </body>

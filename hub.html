@@ -20,11 +20,20 @@
         <h1>메모</h1>
         <input id="hubSearch" class="search" placeholder="메모·인용문 검색">
       </header>
-      <section class="empty">
-        저장된 문서와 메모는 M5에서 표시합니다.
-      </section>
+      <section id="hubEmpty" class="empty" hidden>저장된 문서가 없습니다.</section>
+      <section id="docList" class="doc-list" aria-live="polite"></section>
+      <div id="hubToast" class="hub-toast" role="status" aria-live="polite" hidden></div>
+      <dialog id="deleteDialog" class="delete-dialog">
+        <form method="dialog">
+          <h2>문서를 삭제할까요?</h2>
+          <p id="deleteMessage"></p>
+          <div class="dialog-actions">
+            <button class="delete-confirm" value="delete">삭제</button>
+            <button id="deleteCancel" class="delete-cancel" value="cancel" autofocus>취소</button>
+          </div>
+        </form>
+      </dialog>
     </main>
     <script type="module" src="/src/hub/hub.ts"></script>
   </body>
 </html>
-

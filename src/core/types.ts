@@ -53,9 +53,8 @@ export interface FigureEntry {
   label: string;
   page: number;
   captionText: string;
-  captionAnchor: { page: number; start: number; end: number };
+  captionAnchor?: { page: number; start: number; end: number };
   region: { page: number; rect: PdfRect } | null;
   regionSource: 'auto' | 'manual';
   confidence: number;
 }
-

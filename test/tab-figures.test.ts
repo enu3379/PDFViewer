@@ -1,9 +1,12 @@
-import type { PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EngineFigure, EngineResult, FigExtractApi } from '../src/core/fig-engine';
-import { FiguresTab } from '../src/viewer/panel/tab-figures';
+import type { FigureEntry } from '../src/core/types';
+import { FiguresTab, type FiguresTabCallbacks } from '../src/viewer/panel/tab-figures';
 
-type Listener = (event: { target: FakeElement }) => void;
+type Listener = (event: {
+  target: FakeElement;
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}) => void;
 
 class FakeElement {
   readonly tagName: string;
@@ -15,11 +18,24 @@ class FakeElement {
   type = '';
   src = '';
   alt = '';
+  role = '';
+  tabIndex = -1;
+  title = '';
+  decoding = '';
   attributes: Record<string, string> = {};
+  classList = {
+    add: () => {},
+    toggle: () => {},
+    contains: () => false
+  };
   #listeners = new Map<string, Listener[]>();
 
   constructor(tagName = 'div') {
     this.tagName = tagName.toUpperCase();
+  }
+
+  set innerHTML(value: string) {
+    if (value === '') this.children = [];
   }
 
   addEventListener(type: string, listener: Listener): void {
@@ -29,7 +45,9 @@ class FakeElement {
   }
 
   emit(type: string, target: FakeElement): void {
-    for (const listener of this.#listeners.get(type) ?? []) listener({ target });
+    for (const listener of this.#listeners.get(type) ?? []) {
+      listener({ target, preventDefault: () => {}, stopPropagation: () => {} });
+    }
   }
 
   append(...children: FakeElement[]): void {
@@ -48,35 +66,46 @@ class FakeElement {
     this.attributes[name] = value;
   }
 
+  querySelector(): FakeElement | null {
+    return null;
+  }
+
   closest(selector: string): FakeElement | null {
-    if (selector.startsWith('.') && this.className.split(/\s+/).includes(selector.slice(1))) {
+    const dataMatch = selector.match(/^\[data-([a-z-]+)\]$/);
+    if (dataMatch) {
+      const key = dataMatch[1].replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+      if (this.dataset[key] !== undefined) return this;
+    } else if (selector.startsWith('.') && this.className.split(/\s+/).includes(selector.slice(1))) {
       return this;
     }
     return this.parent?.closest(selector) ?? null;
   }
 }
 
-const doc = {} as PDFDocumentProxy;
-const figure = (page: number, num = String(page)): EngineFigure => ({
-  num,
+const entry = (id: string, page: number, label: string): FigureEntry => ({
+  id,
+  doc: 'doc',
+  kind: 'figure',
+  num: label.replace(/\D+/g, ''),
+  label,
   page,
-  confidence: 1,
-  caption: `Figure ${num}`,
-  bboxPt: { x0: 0, y0: 0, x1: 10, y1: 10 },
-  captionBoxPt: { x0: 0, y0: 10, x1: 10, y1: 12 },
-  bboxPx: { x0: 0, y0: 0, x1: 22, y1: 22 },
-  canvas: {} as HTMLCanvasElement
+  captionText: `${label}. Caption.`,
+  region: null,
+  regionSource: 'auto',
+  confidence: 1
 });
 
-const result = (figures: EngineFigure[]): EngineResult => ({
-  title: null,
-  numPages: 10,
-  engineVersion: 'test',
-  figures
-});
-
-function makeEngine(extract: FigExtractApi['extract']): Pick<FigExtractApi, 'extract' | 'cropDataURL'> {
-  return { extract, cropDataURL: vi.fn(() => 'data:image/png;base64,test') };
+function makeCallbacks(onScan: FiguresTabCallbacks['onScan']): FiguresTabCallbacks {
+  return {
+    onScan,
+    onJumpFigure: vi.fn(),
+    onJumpMention: vi.fn(),
+    onStartCrop: vi.fn(),
+    onSaveCrop: vi.fn(),
+    onRedoCrop: vi.fn(),
+    onCancelCrop: vi.fn(),
+    renderRegion: vi.fn(async () => null)
+  };
 }
 
 describe('FiguresTab', () => {
@@ -97,67 +126,59 @@ describe('FiguresTab', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders native buttons and jumps when a card is activated', async () => {
+  it('renders accessible cards after a scan and jumps via the preview control', async () => {
     const list = new FakeElement();
-    const onJumpToPage = vi.fn();
-    const engine = makeEngine(vi.fn(async () => result([figure(4)])));
-    const tab = new FiguresTab(
-      list as unknown as HTMLElement,
-      { onJumpToPage },
-      engine
-    );
+    const callbacks = makeCallbacks(vi.fn(async () => [entry('fig4-p4', 4, 'Figure 4')]));
+    const tab = new FiguresTab(list as unknown as HTMLElement, callbacks);
 
-    tab.setDocument(doc);
-    await vi.waitFor(() => expect(list.children[0]?.className).toBe('fig-card'));
+    tab.setDocument([]);
+    tab.ensureScanned();
+    await vi.waitFor(() => expect(list.children[0]?.className).toContain('fig-card'));
 
-    const card = list.children[0];
-    expect(card.tagName).toBe('BUTTON');
-    expect(card.type).toBe('button');
-    expect(card.attributes['aria-label']).toBe('Figure 4, 4페이지로 이동');
-    list.emit('click', card);
-    expect(onJumpToPage).toHaveBeenCalledWith(4);
+    const preview = list.children[0].children[0];
+    expect(preview.className).toBe('fig-preview');
+    expect(preview.role).toBe('button');
+    expect(preview.tabIndex).toBe(0);
+    list.emit('click', preview);
+    expect(callbacks.onJumpFigure).toHaveBeenCalledWith('fig4-p4');
   });
 
   it('offers a retry after failure and succeeds without replacing the document', async () => {
     const list = new FakeElement();
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const extract = vi.fn()
+    const onScan = vi.fn()
       .mockRejectedValueOnce(new Error('temporary failure'))
-      .mockResolvedValueOnce(result([]));
-    const tab = new FiguresTab(
-      list as unknown as HTMLElement,
-      { onJumpToPage: vi.fn() },
-      makeEngine(extract)
-    );
+      .mockResolvedValueOnce([]);
+    const tab = new FiguresTab(list as unknown as HTMLElement, makeCallbacks(onScan));
 
-    tab.setDocument(doc);
+    tab.setDocument([]);
+    tab.ensureScanned();
     await vi.waitFor(() => expect(list.children[0]?.children[0]?.className).toContain('fig-retry'));
+    expect(list.children[0].children[0].dataset.action).toBe('retry');
 
     list.emit('click', list.children[0].children[0]);
-    await vi.waitFor(() => expect(extract).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(onScan).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(list.children[0]?.textContent).toContain('감지된 figure가 없어요'));
     expect(error).toHaveBeenCalledTimes(1);
   });
 
   it('discards a stale scan when the document changes', async () => {
     const list = new FakeElement();
-    let resolveFirst: ((value: EngineResult) => void) | undefined;
-    const first = new Promise<EngineResult>((resolve) => { resolveFirst = resolve; });
-    const extract = vi.fn()
+    let resolveFirst: ((value: FigureEntry[]) => void) | undefined;
+    const first = new Promise<FigureEntry[]>((resolve) => { resolveFirst = resolve; });
+    const onScan = vi.fn()
       .mockReturnValueOnce(first)
-      .mockResolvedValueOnce(result([figure(2)]));
-    const tab = new FiguresTab(
-      list as unknown as HTMLElement,
-      { onJumpToPage: vi.fn() },
-      makeEngine(extract)
-    );
+      .mockResolvedValueOnce([entry('fig2-p2', 2, 'Figure 2')]);
+    const tab = new FiguresTab(list as unknown as HTMLElement, makeCallbacks(onScan));
 
-    tab.setDocument(doc);
-    tab.setDocument({} as PDFDocumentProxy);
-    await vi.waitFor(() => expect(list.children[0]?.dataset.page).toBe('2'));
+    tab.setDocument([]);
+    tab.ensureScanned();
+    tab.setDocument([]);
+    tab.ensureScanned();
+    await vi.waitFor(() => expect(list.children[0]?.dataset.fig).toBe('fig2-p2'));
 
-    resolveFirst?.(result([figure(9)]));
+    resolveFirst?.([entry('fig9-p9', 9, 'Figure 9')]);
     await Promise.resolve();
-    expect(list.children[0]?.dataset.page).toBe('2');
+    expect(list.children[0]?.dataset.fig).toBe('fig2-p2');
   });
 });

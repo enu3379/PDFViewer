@@ -1,8 +1,12 @@
 import 'pdfjs-dist/web/pdf_viewer.css';
 import './viewer.css';
 import { createAnchorFromRange, repairAnchor } from '../core/anchor';
+import { FigExtract, toFigureEntries, type FigureSeed } from '../core/fig-engine';
+import { findCaptionAnchor, mergeFigureEntries } from '../core/figures';
 import { escapeHtml, parseLinks, parseTags } from '../core/format';
+import { figureMentions, injectFigureReferenceLinks, nearestFigureMention, scanFigureReferences, updateReferenceLinkActive, type FigureReference } from '../core/mentions';
 import { isFileUrl, parseViewableUrl } from '../core/pdf-url';
+import { renderRegionDataURL } from '../core/render-region';
 import {
   DEFAULT_PEN_THEME,
   isPenTheme,
@@ -12,18 +16,28 @@ import {
   type PenTheme
 } from '../core/pen-theme';
 import { makeId, MarginStore, type DocData } from '../core/store';
-import { buildPageTextIndex, type PageTextIndex } from '../core/text-index';
-import type { Highlight, Memo, PenColor } from '../core/types';
+import { buildPageTextIndex, rangeFromOffsets, type PageTextIndex } from '../core/text-index';
+import type { FigureEntry, Highlight, Memo, PenColor, PdfRect } from '../core/types';
+import { CropMode, type CropRegion } from './crop-mode';
+import { jumpToRegion, jumpToText, type JumpAccess } from './jump';
 import { HighlightOverlay } from './overlay-highlights';
-import { FiguresTab } from './panel/tab-figures';
+import { FiguresTab, type CropPreviewState } from './panel/tab-figures';
 import { MemoTab } from './panel/tab-memos';
-import { type FlatOutlineItem, PdfHost } from './pdf-host';
+import { type FlatOutlineItem, PdfHost, type ResolvedPdfDestination } from './pdf-host';
 
 const PANEL_WIDTH_KEY = 'margin:panelWidth';
 const PANEL_MIN_WIDTH = 264;
 const PANEL_MAX_WIDTH = 560;
 const VIEWER_MIN_WIDTH = 360;
 const PANEL_STEP = 16;
+const DEST_MATCH_TOLERANCE_PT = 40;
+const ANNOTATION_ORIGIN_TTL_MS = 3000;
+
+type TextScanIndex = {
+  page: number;
+  text: string;
+  segments: Array<{ start: number; end: number; yPdf?: number }>;
+};
 
 function readFileParam(): string | null {
   const search = location.search.startsWith('?') ? location.search.slice(1) : location.search;
@@ -236,10 +250,20 @@ async function initializeDoc(titleFallback: string, url?: string): Promise<void>
   const meta = await host.getDocMeta(titleFallback, url);
   docData = await store.loadDoc(meta);
   pageIndexes.clear();
+  pageScanIndexes.clear();
+  figureReferences = [];
+  captionYByFigure.clear();
+  activeFigureId = null;
+  activeOriginRefKey = null;
+  pendingCrop = null;
   lostHighlights.clear();
   buildRenderedPageIndexes();
   syncAnnotationViews();
   repairRenderedPages();
+  figuresTab.setDocument(docData.figures);
+  cropMode.cancel(false);
+  void refreshFigureReferences();
+  figuresTab.ensureScanned();
 }
 
 function markTocForPage(page: number): void {
@@ -255,7 +279,7 @@ function markTocForPage(page: number): void {
 
 async function loadUrl(file: string): Promise<void> {
   setLoading(file);
-  figuresTab.setDocument(null);
+  figuresTab.setDocument([]);
   if (fileLabel) fileLabel.textContent = basenameFromUrl(file);
   const isLocalFile = isFileSchemeUrl(file);
   if (isLocalFile && !(await canReadFileSchemeUrls())) {
@@ -263,8 +287,7 @@ async function loadUrl(file: string): Promise<void> {
     return;
   }
   try {
-    const doc = await host.loadUrl(file);
-    figuresTab.setDocument(doc);
+    await host.loadUrl(file);
     await initializeDoc(basenameFromUrl(file), file);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(basenameFromUrl(file));
@@ -274,7 +297,7 @@ async function loadUrl(file: string): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
-    figuresTab.setDocument(null);
+    figuresTab.setDocument([]);
     if (isLocalFile && isMissingPdfError(error)) {
       showMissingFileState(file);
       return;
@@ -285,11 +308,10 @@ async function loadUrl(file: string): Promise<void> {
 
 async function loadSelectedFile(file: File): Promise<void> {
   setLoading(file.name);
-  figuresTab.setDocument(null);
+  figuresTab.setDocument([]);
   if (fileLabel) fileLabel.textContent = file.name;
   try {
-    const doc = await host.loadFile(file);
-    figuresTab.setDocument(doc);
+    await host.loadFile(file);
     await initializeDoc(file.name);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(file.name);
@@ -299,7 +321,7 @@ async function loadSelectedFile(file: File): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
-    figuresTab.setDocument(null);
+    figuresTab.setDocument([]);
     setError(error);
   }
 }
@@ -326,6 +348,75 @@ function getOrBuildPageIndex(pageNumber: number): PageTextIndex | null {
   return index;
 }
 
+function getJumpAccess(): JumpAccess {
+  return {
+    container: viewerContainer,
+    viewer: host.viewer,
+    getPageDiv: (pageNumber) => host.getPageDiv(pageNumber),
+    getPageViewport: (pageNumber) => host.getPageViewport(pageNumber)
+  };
+}
+
+async function getTextScanIndex(pageNumber: number): Promise<TextScanIndex | null> {
+  const existing = pageScanIndexes.get(pageNumber);
+  if (existing) return existing;
+  const pdfDocument = host.pdfDocument;
+  if (!pdfDocument) {
+    const rendered = pageIndexes.get(pageNumber);
+    if (!rendered) return null;
+    const scanIndex: TextScanIndex = { page: rendered.page, text: rendered.text, segments: [] };
+    pageScanIndexes.set(pageNumber, scanIndex);
+    return scanIndex;
+  }
+
+  const page = await pdfDocument.getPage(pageNumber);
+  const textContent = await page.getTextContent();
+  const segments: TextScanIndex['segments'] = [];
+  let text = '';
+  for (const item of textContent.items as Array<{ str?: string; transform?: unknown[] }>) {
+    const str = item.str ?? '';
+    const start = text.length;
+    text += str;
+    const yPdf = Array.isArray(item.transform) && typeof item.transform[5] === 'number'
+      ? item.transform[5]
+      : undefined;
+    segments.push({ start, end: text.length, yPdf });
+  }
+  const scanIndex: TextScanIndex = { page: pageNumber, text, segments };
+  pageScanIndexes.set(pageNumber, scanIndex);
+  return scanIndex;
+}
+
+function yForScanOffset(index: TextScanIndex, offset: number): number | undefined {
+  return index.segments.find((segment) => offset >= segment.start && offset < segment.end)?.yPdf;
+}
+
+function yForRenderedOffset(index: PageTextIndex, pageDiv: HTMLElement, offset: number): number | undefined {
+  const viewport = host.getPageViewport(index.page);
+  if (!viewport) return undefined;
+  const end = Math.min(index.text.length, Math.max(offset + 1, offset));
+  const range = rangeFromOffsets(index, offset, end);
+  if (!range) return undefined;
+  const rect = range.getClientRects()[0];
+  range.detach();
+  if (!rect) return undefined;
+  const pageBounds = pageDiv.getBoundingClientRect();
+  return viewport.convertToPdfPoint(rect.left - pageBounds.left, rect.top - pageBounds.top)[1];
+}
+
+function replacePageReferences(pageNumber: number, refs: FigureReference[]): void {
+  figureReferences = [
+    ...figureReferences.filter((reference) => reference.page !== pageNumber),
+    ...refs
+  ].sort((a, b) => a.page - b.page || a.start - b.start);
+  updateFigureTabData();
+}
+
+function updateFigureTabData(): void {
+  if (!docData) return;
+  figuresTab.setData(docData.figures, figureMentions(figureReferences));
+}
+
 function buildRenderedPageIndexes(): void {
   for (let pageNumber = 1; pageNumber <= host.pageCount; pageNumber += 1) {
     const pageDiv = host.getPageDiv(pageNumber);
@@ -340,8 +431,45 @@ function handleTextLayerRendered(pageNumber: number): void {
   if (!pageDiv) return;
   const index = buildPageTextIndex(pageNumber, pageDiv);
   pageIndexes.set(pageNumber, index);
+  pageScanIndexes.delete(pageNumber);
+  updateRenderedFigureReferences(pageNumber, pageDiv, index);
   repairPageAnchors(pageNumber);
   syncAnnotationViews();
+}
+
+function updateRenderedFigureReferences(pageNumber: number, pageDiv: HTMLElement, index: PageTextIndex): void {
+  if (!docData?.figures.length) return;
+  const refs = scanFigureReferences(
+    index,
+    docData.figures,
+    (offset) => yForRenderedOffset(index, pageDiv, offset)
+  );
+  for (const reference of refs) {
+    if (reference.isCaptionLabel && reference.yPdf !== undefined) {
+      captionYByFigure.set(reference.figId, reference.yPdf);
+    }
+  }
+  replacePageReferences(pageNumber, refs);
+  injectFigureReferencesForPage(pageNumber);
+}
+
+function injectFigureReferencesForPage(pageNumber: number): void {
+  if (!docData?.figures.length) return;
+  const pageDiv = host.getPageDiv(pageNumber);
+  const index = pageIndexes.get(pageNumber);
+  if (!pageDiv || !index) return;
+  injectFigureReferenceLinks(
+    pageDiv,
+    index,
+    figureReferences.filter((reference) => reference.page === pageNumber),
+    activeFigureId
+  );
+}
+
+function injectFigureReferencesIntoRenderedPages(): void {
+  for (const pageNumber of pageIndexes.keys()) {
+    injectFigureReferencesForPage(pageNumber);
+  }
 }
 
 function repairRenderedPages(): void {
@@ -373,6 +501,81 @@ function repairPageAnchors(pageNumber: number): void {
     }
   }
   if (changed) scheduleDocSave();
+}
+
+async function scanFigures(setStatus: (text: string) => void): Promise<FigureEntry[]> {
+  const data = docData;
+  if (!data || !host.pdfDocument) return [];
+  const result = await FigExtract.extract(null, {
+    pdfDocument: host.pdfDocument,
+    onProgress: setStatus
+  });
+  const seeds = toFigureEntries(result, pageHeightPt);
+  const incoming: FigureEntry[] = [];
+  for (const seed of seeds) {
+    if (docData !== data) return data.figures;
+    incoming.push(await completeFigureEntry(seed));
+  }
+  if (docData !== data) return data.figures;
+  docData.figures = mergeFigureEntries(docData.figures, incoming);
+  scheduleDocSave();
+  await refreshFigureReferences();
+  return docData.figures;
+}
+
+async function completeFigureEntry(seed: FigureSeed): Promise<FigureEntry> {
+  if (!docData) throw new Error('Document data is not loaded.');
+  const scanIndex = await getTextScanIndex(seed.page);
+  const captionAnchor = scanIndex
+    ? findCaptionAnchor(seed.page, scanIndex.text, seed.captionText)
+    : undefined;
+  if (captionAnchor && scanIndex) {
+    const captionY = yForScanOffset(scanIndex, captionAnchor.start);
+    if (captionY !== undefined) captionYByFigure.set(seed.id, captionY);
+  }
+  return {
+    ...seed,
+    doc: docData.meta.id,
+    captionAnchor
+  };
+}
+
+function pageHeightPt(pageNumber: number): number {
+  const viewport = host.getPageViewport(pageNumber);
+  const scale = ((viewport as { scale?: number } | null)?.scale ?? host.viewer.currentScale) || 1;
+  return viewport ? viewport.height / scale : 792;
+}
+
+async function refreshFigureReferences(): Promise<void> {
+  if (!docData?.figures.length) {
+    figureReferences = [];
+    captionYByFigure.clear();
+    updateFigureTabData();
+    return;
+  }
+
+  const refs: FigureReference[] = [];
+  captionYByFigure.clear();
+  for (const figure of docData.figures) {
+    if (!figure.captionAnchor) continue;
+    const scanIndex = await getTextScanIndex(figure.captionAnchor.page);
+    const captionY = scanIndex ? yForScanOffset(scanIndex, figure.captionAnchor.start) : undefined;
+    if (captionY !== undefined) captionYByFigure.set(figure.id, captionY);
+  }
+
+  for (let pageNumber = 1; pageNumber <= host.pageCount; pageNumber += 1) {
+    const scanIndex = await getTextScanIndex(pageNumber);
+    if (!scanIndex) continue;
+    refs.push(...scanFigureReferences(
+      scanIndex,
+      docData.figures,
+      (offset) => yForScanOffset(scanIndex, offset)
+    ));
+  }
+
+  figureReferences = refs.sort((a, b) => a.page - b.page || a.start - b.start);
+  updateFigureTabData();
+  injectFigureReferencesIntoRenderedPages();
 }
 
 function handleSelection(): void {
@@ -492,12 +695,192 @@ function jumpToHighlight(highlightId: string): void {
   if (!docData) return;
   const highlight = docData.highlights.find((candidate) => candidate.id === highlightId);
   if (!highlight) return;
-  host.viewer.scrollPageIntoView({ pageNumber: highlight.anchor.page });
-  window.setTimeout(() => {
+  const yPdf = highlight.anchor.quads[0]
+    ? Math.max(highlight.anchor.quads[0][1], highlight.anchor.quads[0][3])
+    : undefined;
+  void jumpToText(getJumpAccess(), highlight.anchor.page, yPdf).then(() => {
     const el = overlay.getFirstElement(highlightId);
     if (el) flashElement(el);
-  }, 100);
+  });
   if (!pinned) closePanel();
+}
+
+function openFigurePanel(figId: string, originRefKey: string | null = null): void {
+  if (!docData?.figures.some((figure) => figure.id === figId)) return;
+  activeFigureId = figId;
+  activeOriginRefKey = originRefKey;
+  openPanel('figures');
+  figuresTab.focusFigure(figId, activeOriginRefKey);
+  for (const pageNumber of pageIndexes.keys()) {
+    const pageDiv = host.getPageDiv(pageNumber);
+    if (pageDiv) updateReferenceLinkActive(pageDiv, activeFigureId);
+  }
+}
+
+function handleFigureReferenceClick(event: MouseEvent): void {
+  const link = (event.target as Element).closest<HTMLElement>('a.mgn-ref[data-fig]');
+  if (!link || !viewerContainer.contains(link)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const figId = link.dataset.fig;
+  if (!figId) return;
+  openFigurePanel(figId, link.dataset.cap === '1' ? null : link.dataset.refKey ?? null);
+}
+
+function rememberAnnotationLinkOrigin(event: MouseEvent): void {
+  const link = (event.target as Element).closest<HTMLElement>('.annotationLayer a');
+  if (!link || !viewerContainer.contains(link)) return;
+  const pageDiv = link.closest<HTMLElement>('.page');
+  const pageNumber = Number(pageDiv?.dataset.pageNumber);
+  if (!pageDiv || !Number.isInteger(pageNumber) || pageNumber < 1) return;
+  const viewport = host.getPageViewport(pageNumber);
+  if (!viewport) return;
+  const pageBounds = pageDiv.getBoundingClientRect();
+  const yPdf = viewport.convertToPdfPoint(
+    event.clientX - pageBounds.left,
+    event.clientY - pageBounds.top
+  )[1];
+  annotationLinkOrigin = { page: pageNumber, yPdf, at: Date.now() };
+}
+
+function takeAnnotationLinkOrigin(): { page: number; yPdf: number } | null {
+  const origin = annotationLinkOrigin;
+  annotationLinkOrigin = null;
+  if (!origin || Date.now() - origin.at > ANNOTATION_ORIGIN_TTL_MS) return null;
+  return { page: origin.page, yPdf: origin.yPdf };
+}
+
+function handleInternalDestination(destination: ResolvedPdfDestination): boolean {
+  const origin = takeAnnotationLinkOrigin();
+  const figure = findFigureForDestination(destination);
+  if (!figure) return false;
+  const originMention = origin
+    ? nearestFigureMention(figureReferences, figure.id, origin.page, origin.yPdf)
+    : null;
+  openFigurePanel(figure.id, originMention?.key ?? null);
+  return true;
+}
+
+function findFigureForDestination(destination: ResolvedPdfDestination): FigureEntry | null {
+  if (!docData?.figures.length) return null;
+  const samePage = docData.figures.filter((figure) => figure.page === destination.pageNumber);
+  if (!samePage.length) return null;
+
+  const y = destination.yPdf;
+  const x = destination.xPdf;
+  if (y !== undefined) {
+    const byRegion = samePage.find((figure) => {
+      if (!figure.region || figure.region.page !== destination.pageNumber) return false;
+      const [x1, y1, x2, y2] = normalizeRect(figure.region.rect);
+      const yMatches = y >= y1 - DEST_MATCH_TOLERANCE_PT && y <= y2 + DEST_MATCH_TOLERANCE_PT;
+      const xMatches = x === undefined || (x >= x1 - DEST_MATCH_TOLERANCE_PT && x <= x2 + DEST_MATCH_TOLERANCE_PT);
+      return yMatches && xMatches;
+    });
+    if (byRegion) return byRegion;
+
+    const byCaption = samePage.find((figure) => {
+      const captionY = captionYByFigure.get(figure.id);
+      return captionY !== undefined && Math.abs(captionY - y) <= DEST_MATCH_TOLERANCE_PT;
+    });
+    if (byCaption) return byCaption;
+  }
+
+  return samePage.length === 1 ? samePage[0] : null;
+}
+
+function jumpToFigure(figId: string): void {
+  if (!docData) return;
+  const figure = docData.figures.find((candidate) => candidate.id === figId);
+  if (!figure) return;
+  if (activeFigureId !== figId) activeOriginRefKey = null;
+  activeFigureId = figId;
+  figuresTab.focusFigure(figId, activeOriginRefKey);
+  if (figure.region) {
+    void jumpToRegion(getJumpAccess(), figure.region.page, figure.region.rect);
+  } else if (figure.captionAnchor) {
+    const yPdf = captionYByFigure.get(figure.id);
+    void jumpToText(getJumpAccess(), figure.captionAnchor.page, yPdf);
+  } else {
+    host.setPage(figure.page);
+  }
+}
+
+function jumpToFigureMention(refKey: string): void {
+  const mention = figureReferences.find((reference) => reference.key === refKey);
+  if (!mention) return;
+  void jumpToText(getJumpAccess(), mention.page, mention.yPdf);
+  if (!pinned) closePanel();
+}
+
+async function jumpToOutlineItem(item: FlatOutlineItem): Promise<void> {
+  if (item.url) {
+    await host.jumpToOutline(item);
+    return;
+  }
+  const resolved = item.dest ? await host.resolveDestination(item.dest as string | unknown[]) : null;
+  if (resolved?.yPdf !== undefined) {
+    await jumpToText(getJumpAccess(), resolved.pageNumber, resolved.yPdf);
+  } else {
+    await host.jumpToOutline(item);
+  }
+}
+
+async function renderFigureRegion(region: { page: number; rect: PdfRect }): Promise<string | null> {
+  return host.pdfDocument ? renderRegionDataURL(host.pdfDocument, region.page, region.rect) : null;
+}
+
+function startFigureCrop(figId: string): void {
+  if (!docData) return;
+  const figure = docData.figures.find((candidate) => candidate.id === figId);
+  if (!figure) return;
+  pendingCrop = null;
+  figuresTab.setCropPreview(null);
+  openFigurePanel(figId);
+  void cropMode.start(figure);
+}
+
+function saveFigureCrop(): void {
+  if (!docData || !pendingCrop) return;
+  const figure = docData.figures.find((candidate) => candidate.id === pendingCrop?.figId);
+  if (!figure) return;
+  figure.page = pendingCrop.region.page;
+  figure.region = pendingCrop.region;
+  figure.regionSource = 'manual';
+  figure.confidence = 1;
+  cropMode.accept();
+  pendingCrop = null;
+  figuresTab.setCropPreview(null);
+  scheduleDocSave();
+  updateFigureTabData();
+}
+
+function redoFigureCrop(figId: string): void {
+  pendingCrop = null;
+  figuresTab.setCropPreview(null);
+  startFigureCrop(figId);
+}
+
+function cancelFigureCrop(): void {
+  cropMode.cancel(false);
+  pendingCrop = null;
+  figuresTab.setCropPreview(null);
+}
+
+function handleCropPreview(region: CropRegion): void {
+  const figId = cropMode.figId;
+  if (!figId) return;
+  pendingCrop = { figId, region };
+  figuresTab.setCropPreview(pendingCrop);
+}
+
+function handleCropCancel(): void {
+  pendingCrop = null;
+  figuresTab.setCropPreview(null);
+}
+
+function normalizeRect(rect: PdfRect): PdfRect {
+  const [x1, y1, x2, y2] = rect;
+  return [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
 }
 
 function isFileDrag(event: DragEvent): boolean {
@@ -714,7 +1097,14 @@ let currentPen: PenColor = 'amber';
 let docData: DocData | null = null;
 const store = new MarginStore();
 const pageIndexes = new Map<number, PageTextIndex>();
+const pageScanIndexes = new Map<number, TextScanIndex>();
 const lostHighlights = new Set<string>();
+let figureReferences: FigureReference[] = [];
+const captionYByFigure = new Map<string, number>();
+let activeFigureId: string | null = null;
+let activeOriginRefKey: string | null = null;
+let annotationLinkOrigin: { page: number; yPdf: number; at: number } | null = null;
+let pendingCrop: CropPreviewState | null = null;
 
 function setActivePen(color: PenColor): void {
   currentPen = color;
@@ -747,7 +1137,19 @@ const host = new PdfHost(
   { container: viewerContainer, viewer: viewerElement },
   {
     onPageChange: setPageUi,
-    onScaleChange: setScaleUi
+    onScaleChange: setScaleUi,
+    onInternalDestination: handleInternalDestination
+  }
+);
+
+const cropMode = new CropMode(
+  {
+    ...getJumpAccess(),
+    pageCount: () => host.pageCount
+  },
+  {
+    onPreview: handleCropPreview,
+    onCancel: handleCropCancel
   }
 );
 
@@ -831,6 +1233,8 @@ fileInput.addEventListener('change', () => {
 viewerContainer.addEventListener('mouseup', () => {
   window.setTimeout(handleSelection, 0);
 });
+viewerContainer.addEventListener('click', rememberAnnotationLinkOrigin, true);
+viewerContainer.addEventListener('click', handleFigureReferenceClick);
 
 prevPage.addEventListener('click', () => host.previousPage());
 nextPage.addEventListener('click', () => host.nextPage());
@@ -843,10 +1247,14 @@ pageNumberInput.addEventListener('change', () => {
 });
 
 const figuresTab = new FiguresTab(figList, {
-  onJumpToPage: (page) => {
-    host.setPage(page);
-    if (!pinned) closePanel();
-  }
+  onScan: scanFigures,
+  onJumpFigure: jumpToFigure,
+  onJumpMention: jumpToFigureMention,
+  onStartCrop: startFigureCrop,
+  onSaveCrop: saveFigureCrop,
+  onRedoCrop: redoFigureCrop,
+  onCancelCrop: cancelFigureCrop,
+  renderRegion: renderFigureRegion
 });
 
 for (const button of document.querySelectorAll<HTMLButtonElement>('.ptab')) {
@@ -886,7 +1294,7 @@ tocList.addEventListener('click', (event) => {
   if (!row) return;
   const item = outlineItems.find((candidate) => candidate.id === row.dataset.id);
   if (!item) return;
-  void host.jumpToOutline(item).then(() => {
+  void jumpToOutlineItem(item).then(() => {
     if (!pinned) closePanel();
   });
 });

@@ -28,6 +28,7 @@ describe('figure engine integration', () => {
       title: 'Paper',
       numPages: 3,
       engineVersion: 'test',
+      suspectedMissing: [],
       figures: [
         {
           num: '2',

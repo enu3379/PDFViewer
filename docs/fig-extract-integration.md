@@ -55,10 +55,21 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 
 - **좌표계**: 엔진은 pt 단위·좌상단 원점. Margin 저장 규약(PDF user space, 좌하단 원점)으로는
   `toPdfRect()`가 변환한다 (`y' = pageHeight − y`).
+- **figure 식별 키 = (num, page)** (v2.5.0+): 같은 `num`이 다른 페이지에 복수 등장할 수 있다
+  (합본 논문·부록 번호 재시작 — #14). num 단독을 키로 쓰지 말 것 — `toFigureEntries`의
+  `fig{num}-p{page}` ID가 올바른 키다. 결과 정렬은 page 오름차순 → num 자연순 (결정적).
+- **suspectedMissing** (v2.4.0+): 감지된 정수 번호 1..최대 중 빠진 번호 목록 (미탐지 의심).
+  소비자가 무시해도 되는 보고 필드 — "이 논문에 Fig N이 있을 텐데 못 잡았다" UI에 활용 가능.
+- **취소** (v2.5.0+): `opts.signal`(AbortSignal) 전달 시 페이지 단위로 체크해 AbortError로 reject.
+  문서 교체 시 이전 스캔 중단에 사용 (#12). 페이지 렌더 도중에는 다음 체크 지점까지 진행됨(협조적).
+- **canvas 수명/메모리** (#12): `figure.canvas`는 같은 페이지 figure들이 공유하는 전체 페이지 렌더
+  참조 — 프리뷰 생성 후 참조를 버리면 GC 회수 가능. 페이지 렌더 LRU·object URL revoke는 Margin 몫.
 - **pdf.js 버전**: 엔진은 pdfjs-dist 4.10.38(프로젝트 고정 버전) 기준으로 테스트 샘플 검증됨.
 - **confidence**: 현재 1.0 고정 (플레이스홀더). 추후 감지 경로별 실측 값으로 교체 예정.
 - **Table 미지원**: 엔진은 figure만 감지한다. Table region은 v1에서 수동 크롭으로 처리.
 - **텍스트 레이어 없는 PDF(스캔본)**: 캡션을 찾지 못해 figures가 빈 배열 — 정상 동작.
+- **라벨·캡션 없는 figure / label-above 레이아웃**: "Figure N" 표기가 아예 없는 문서는 구조적 미탐지,
+  라벨이 그림 위에 오는 문서(NBER류)는 인접 figure 오탐 가능 — 엔진 repo 백로그 (ALGORITHM.md §알려진 한계).
 - 엔진은 백그라운드 탭에서 크롬 타이머 스로틀링의 영향을 받는다(분석이 수십 배 느려짐).
   전체 문서 스캔은 사용자가 뷰어를 보고 있는 동안 idle로 돌리는 것을 권장.
 

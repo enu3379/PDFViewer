@@ -72,6 +72,7 @@ const result = (figures: EngineFigure[]): EngineResult => ({
   title: null,
   numPages: 10,
   engineVersion: 'test',
+  suspectedMissing: [],
   figures
 });
 

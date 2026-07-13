@@ -3,7 +3,7 @@
  *
  * ⚠ 이 파일은 PDFViewer(Margin) repo의 src/core/fig-extract.js 로 그대로 복사(vendoring)된다.
  *   알고리즘 수정은 figure-preview-test repo에서만 한다.
- *   릴리스 절차: figure-preview-test/docs/DEV.md §버전 릴리스 절차
+ *   릴리스 절차: figure-preview-test/docs/PLAYBOOKS.md §SUB-R
  *   벤더링 절차: PDFViewer/docs/fig-extract-integration.md §갱신 절차
  *
  * 의존성: pdf.js (전역 pdfjsLib). 브라우저 전용 (canvas 사용).
@@ -14,9 +14,13 @@
  *     maxPages: 60,            // 선택
  *     pdfDocument: doc,        // 선택 — 이미 로드된 PDFDocumentProxy 재사용 (지정 시 data는 null 가능)
  *     renderPage: async (pageNum, scale) => canvas,  // 선택 — 호스트 렌더 캐시 주입
+ *     signal: abortCtrl.signal, // 선택 — 협조 취소 (페이지 단위 체크, abort 시 AbortError throw)
  *   });
- *   // result = { title, numPages, engineVersion, figures: [...] }
+ *   // result = { title, numPages, engineVersion, figures: [...], suspectedMissing: ["1", ...] }
  *   // figure = { num, page, confidence, caption, bboxPt(그림만), captionBoxPt, bboxPx, canvas }
+ *   //   식별 키 = (num, page). 같은 num이 다른 페이지에 복수 등장 가능 (v2.5.0+ — 합본·부록 번호 재시작)
+ *   // suspectedMissing = 감지된 정수 번호 1..최대 중 빠진 번호 (미탐지 의심 — 소비자가 무시해도 됨)
+ *   // canvas는 페이지당 공유 참조 — 소비자는 프리뷰 생성 후 참조를 버려 메모리를 회수할 수 있다
  *   // 크롭 이미지: FigExtract.cropDataURL(fig) / FigExtract.cropBlob(fig)
  *   // 좌표: pt, 좌상단 원점. PDF user space 변환은 y' = pageHeight - y
  *
@@ -26,7 +30,13 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.3.0";
+const VERSION = "2.5.0";
+// 2.5.0: [BREAKING] figures의 num 유일성 폐기 — dedup을 (num, page) 인스턴스 단위로 완화 (PDFViewer#14:
+//        합본 논문·부록 번호 재시작 보존. 같은 페이지 중복만 score 선택). 정렬을 page→num 자연순으로 결정화.
+//        소비자 식별 키는 (num, page) — Margin은 fig{num}-p{page} ID로 이미 대응.
+//        + opts.signal(AbortSignal) 협조 취소 지원 (PDFViewer#12, 페이지 단위 체크)
+// 2.4.0: [필드 추가] suspectedMissing — 감지된 정수 번호 1..최대 중 빠진 번호 목록 (미탐지 의심 후처리).
+//        감지·bbox 로직 무변경. QA(review.html)와 소비자(Margin)가 같은 추론을 공유하기 위해 엔진으로 이동
 // 2.3.0: [BREAKING] method 필드 제거 — 감지 경로가 아니라 "영역이 래스터 이미지와 겹치는지"의
 //        사후 라벨이었음. 중복 번호 dedup 내부용으로만 유지. 헤더 정리·globalThis 노출 포함. bbox 로직 무변경
 // 2.2.1: opts.pdfDocument 지원 — 호스트(Margin 뷰어)가 이미 로드한 PDFDocumentProxy 재사용 (재파싱 방지)
@@ -415,8 +425,15 @@ async function extract(data, opts = {}) {
   const onProgress = opts.onProgress || (() => {});
   const dbg = opts.debug || (() => {});
   const maxPages = opts.maxPages || MAX_PAGES;
+  /* 협조적 취소 (PDFViewer#12): 페이지 단위로 signal 체크 — 문서 교체 시 호스트가 abort */
+  const checkAborted = () => {
+    if (opts.signal && opts.signal.aborted)
+      throw new DOMException("figure 추출이 취소됨", "AbortError");
+  };
+  checkAborted();
 
   const pdf = opts.pdfDocument || await pdfjsLib.getDocument({ data }).promise;
+  checkAborted();
   let title = null;
   try {
     const meta = await pdf.getMetadata();
@@ -428,6 +445,7 @@ async function extract(data, opts = {}) {
   const pageData = [];
   const fontW = {};
   for (let p = 1; p <= nPages; p++) {
+    checkAborted();
     onProgress(`텍스트 분석… ${p}/${nPages}`);
     const page = await pdf.getPage(p);
     const vp = page.getViewport({ scale: 1 });
@@ -440,6 +458,7 @@ async function extract(data, opts = {}) {
   /* 2차: 캡션 있는 페이지만 렌더 + 감지 */
   const allFigs = [];
   for (const pd of pageData) {
+    checkAborted();
     if (!pd.lines.some(isCaption)) continue;
     onProgress(`figure 감지… p.${pd.num}`);
     pd.images = await getImageBoxes(pd.page, pd.h);
@@ -457,15 +476,19 @@ async function extract(data, opts = {}) {
     const figs = detectPage(pd, pd.lines, dom, grid, dbg);
     for (const f of figs) { f.canvas = canvas; allFigs.push(f); }
   }
-  /* 중복 번호는 더 그럴듯한 후보 선택 */
+  /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
+   * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 같은 페이지의 중복 후보만
+   * 더 그럴듯한 것(래스터 포함 > 큰 높이)을 선택. 소비자 식별 키 = (num, page). */
   const best = {};
   for (const f of allFigs) {
+    const key = f.num + "@" + f.page;
     const score = (f.raster_ ? 1e9 : 0) + f.h_;
-    if (!(f.num in best) || score > best[f.num].score) best[f.num] = { score, f };
+    if (!(key in best) || score > best[key].score) best[key] = { score, f };
   }
   const figures = Object.values(best).map(v => v.f)
     .filter(f => (f.x1 - f.x0) >= 30 && (f.y1 - f.y0) >= 30)
-    .sort((a, b) => String(a.num).length - String(b.num).length || String(a.num).localeCompare(String(b.num)));
+    .sort((a, b) => a.page - b.page ||
+                    String(a.num).localeCompare(String(b.num), undefined, { numeric: true }));
   for (const f of figures) {
     f.bboxPx = { x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1 };
     f.bboxPt = { x0: +(f.x0 / S).toFixed(1), y0: +(f.y0 / S).toFixed(1),
@@ -476,7 +499,16 @@ async function extract(data, opts = {}) {
     delete f.raster_;
     f.confidence = 1.0; // 당분간 고정 (Margin FigureEntry.confidence 대응)
   }
-  return { title, numPages: pdf.numPages, figures, engineVersion: VERSION };
+  /* 후처리: 번호 공백 추론 — 감지된 정수 번호 1..최대 중 빠진 번호 = 미탐지 의심.
+   * 부록 번호("A.1", "B.2")·로마숫자는 1부터 시작한다는 가정이 안 통해 제외. (Dong-2025 유래) */
+  checkAborted(); // 마지막 페이지 렌더 중 abort돼도 완료 결과를 반환하지 않도록 최종 체크
+  const intNums = new Set(figures.map(f => String(f.num)).filter(n => /^\d+$/.test(n)).map(Number));
+  const suspectedMissing = [];
+  if (intNums.size) {
+    const maxN = Math.max(...intNums);
+    for (let n = 1; n <= maxN; n++) if (!intNums.has(n)) suspectedMissing.push(String(n));
+  }
+  return { title, numPages: pdf.numPages, figures, suspectedMissing, engineVersion: VERSION };
 }
 
 /* ===================== 크롭 헬퍼 ===================== */

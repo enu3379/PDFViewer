@@ -72,7 +72,7 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
 ## Next
 
 - 이슈 #1 대응: PR #5 머지 완료 (2026-07-09) — Windows 수동 QA(진형, issue-1-qa.md W-1~33)와 이슈 답변 게시·클로즈만 남음.
-- 피규어 UX 개정: G1–G8 구현 + 리뷰·런타임 검증 + main 리베이스 완료 (`feature/figure-ux`, 통합 빌드 검증 통과) — 남은 것: 후속 FG-R1(내장 링크 원점 칩), PR 생성. 상세는 [figure-ux.md](figure-ux.md) §6.1.
+- 피규어 UX 개정: G1–G8 + FG-R1(내장 링크 원점 칩) 구현 완료 (2026-07-13) — dev 리베이스(#9 "로드 즉시 스캔"을 새 아키텍처에 이식: 로드 후 자동 `ensureScanned`, 스캔 세대 가드, 문서 전환 시 저장 가드), dev 프리뷰 런타임 검증 통과. 남은 것: PR 머지, 실기기 QA([figure-ux.md](figure-ux.md) §7). 상세는 [figure-ux.md](figure-ux.md) §6.1.
 - Finish M2 manual QA fixes.
 - Keep figure/table extraction out of the immediate path until the separate figure feature direction is decided.
 - After M2 acceptance, move to either Hub work or the separate figure workflow, depending on priority.

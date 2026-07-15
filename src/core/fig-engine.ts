@@ -29,14 +29,20 @@ export interface EngineFigure {
   bboxPt: EngineBox;            // 그림 영역만 — 캡션 제외
   captionBoxPt: EngineBox;      // 캡션 블록 영역
   bboxPx: EngineBox;            // 분석 렌더 픽셀 (pt × 2.2)
-  canvas: HTMLCanvasElement;    // 해당 페이지 전체 렌더 (scale 2.2)
+  canvas: HTMLCanvasElement;    // 해당 페이지 전체 렌더 (scale 2.2) — 같은 페이지 figure들이 공유하는
+                                // 참조. 프리뷰 생성 후 참조를 버리면 메모리 회수 가능 (#12)
 }
+// v2.5.0: figure 식별 키 = (num, page). 같은 num이 다른 페이지에 복수 등장 가능
+// (합본 논문·부록 번호 재시작 — #14). num 단독을 키로 쓰지 말 것 (toFigureEntries의
+// `fig{num}-p{page}` ID가 올바른 형태).
 
 export interface EngineResult {
   title: string | null;         // PDF 메타데이터 Title
   numPages: number;
   engineVersion: string;
-  figures: EngineFigure[];
+  figures: EngineFigure[];      // 정렬: page 오름차순 → num 자연순 (결정적)
+  /** v2.4.0+: 감지된 정수 번호 1..최대 중 빠진 번호 (미탐지 의심) — 무시해도 됨 */
+  suspectedMissing: string[];
 }
 
 export interface ExtractOptions {
@@ -47,6 +53,8 @@ export interface ExtractOptions {
   pdfDocument?: PDFDocumentProxy;
   /** 호스트의 페이지 렌더 캐시 주입 (미지정 시 엔진이 자체 렌더) */
   renderPage?: (pageNum: number, scale: number) => Promise<HTMLCanvasElement>;
+  /** v2.5.0+: 협조 취소 — 페이지 단위 체크, abort 시 AbortError로 reject (#12 문서 교체 대응) */
+  signal?: AbortSignal;
 }
 
 export interface FigExtractApi {

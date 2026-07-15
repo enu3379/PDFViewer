@@ -61,9 +61,13 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 - **suspectedMissing** (v2.4.0+): 감지된 정수 번호 1..최대 중 빠진 번호 목록 (미탐지 의심).
   소비자가 무시해도 되는 보고 필드 — "이 논문에 Fig N이 있을 텐데 못 잡았다" UI에 활용 가능.
 - **취소** (v2.5.0+): `opts.signal`(AbortSignal) 전달 시 페이지 단위로 체크해 AbortError로 reject.
-  문서 교체 시 이전 스캔 중단에 사용 (#12). 페이지 렌더 도중에는 다음 체크 지점까지 진행됨(협조적).
-- **canvas 수명/메모리** (#12): `figure.canvas`는 같은 페이지 figure들이 공유하는 전체 페이지 렌더
-  참조 — 프리뷰 생성 후 참조를 버리면 GC 회수 가능. 페이지 렌더 LRU·object URL revoke는 Margin 몫.
+  문서 교체 시 이전 스캔 중단에 사용 (#12). v2.5.1+: abort 시 진행 중 페이지 렌더도 `RenderTask.cancel()`로
+  즉시 중단 — 페이지 경계까지 기다리지 않는다. **호스트는 문서 교체 시 반드시 signal을 abort해야 한다**
+  (엔진은 메커니즘만 제공 — signal 미전달 시 스캔이 끝까지 진행됨).
+- **크롭 캔버스 수명/메모리** (#12, v2.5.1+): `figure.cropCanvas`는 그림 영역만의 크롭 렌더(scale 2.2)다.
+  엔진은 페이지 전체 캔버스를 보관하지 않는다(스캔 중 동시 상주 최대 1장) — figure마다 페이지 전체
+  캔버스를 물던 구조(~9.4MB/페이지 상주)가 사라졌다. 프리뷰 생성 후 `cropCanvas` 참조를 버리면 GC 회수.
+  페이지 렌더 LRU·object URL revoke는 여전히 Margin 몫.
 - **pdf.js 버전**: 엔진은 pdfjs-dist 4.10.38(프로젝트 고정 버전) 기준으로 테스트 샘플 검증됨.
 - **confidence**: 현재 1.0 고정 (플레이스홀더). 추후 감지 경로별 실측 값으로 교체 예정.
 - **Table 미지원**: 엔진은 figure만 감지한다. Table region은 v1에서 수동 크롭으로 처리.

@@ -11,16 +11,17 @@
  *   const result = await FigExtract.extract(uint8Array, {
  *     onProgress: msg => {},   // 진행 상태 문자열
  *     debug: msg => {},        // 상세 진단 로그 (선택)
- *     maxPages: 60,            // 선택
+ *     maxPages: 200,           // 선택 — 스캔 페이지 상한 (미지정 시 전체 페이지)
  *     pdfDocument: doc,        // 선택 — 이미 로드된 PDFDocumentProxy 재사용 (지정 시 data는 null 가능)
  *     renderPage: async (pageNum, scale) => canvas,  // 선택 — 호스트 렌더 캐시 주입
  *     signal: abortCtrl.signal, // 선택 — 협조 취소 (페이지 단위 체크, abort 시 AbortError throw)
  *   });
  *   // result = { title, numPages, engineVersion, figures: [...], suspectedMissing: ["1", ...] }
- *   // figure = { num, page, confidence, caption, bboxPt(그림만), captionBoxPt, bboxPx, canvas }
+ *   // figure = { num, page, confidence, caption, bboxPt(그림만), captionBoxPt, bboxPx, cropCanvas }
  *   //   식별 키 = (num, page). 같은 num이 다른 페이지에 복수 등장 가능 (v2.5.0+ — 합본·부록 번호 재시작)
  *   // suspectedMissing = 감지된 정수 번호 1..최대 중 빠진 번호 (미탐지 의심 — 소비자가 무시해도 됨)
- *   // canvas는 페이지당 공유 참조 — 소비자는 프리뷰 생성 후 참조를 버려 메모리를 회수할 수 있다
+ *   // cropCanvas = 그림 영역만의 크롭 렌더 (scale 2.2). 페이지 전체 캔버스는 보관하지 않는다 (PDFViewer#12)
+ *   //   — 소비자는 프리뷰 생성 후 cropCanvas 참조를 버려 메모리를 회수할 수 있다
  *   // 크롭 이미지: FigExtract.cropDataURL(fig) / FigExtract.cropBlob(fig)
  *   // 좌표: pt, 좌상단 원점. PDF user space 변환은 y' = pageHeight - y
  *
@@ -30,7 +31,12 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.5.0";
+const VERSION = "2.5.1";
+// 2.5.1: 메모리 패치 (PDFViewer#12) — ① 페이지 스캔 상한 기본값(60) 제거: 미지정 시 전체 페이지 스캔,
+//        opts.maxPages는 선택적 상한으로 유지. ② figure.canvas(페이지 전체 렌더 보관) 폐지 → 스캔 중
+//        즉시 크롭한 figure.cropCanvas로 대체: 페이지 캔버스 동시 상주 최대 1장, dedup·크기 필터를
+//        페이지 루프 안으로 이동(탈락 후보는 크롭 생략). 탐지·bbox 로직 무변경 (스냅샷 물리 diff 0 기대).
+//        ③ opts.signal abort 시 진행 중 페이지 렌더도 RenderTask.cancel()로 즉시 중단(페이지 경계 대기 제거).
 // 2.5.0: [BREAKING] figures의 num 유일성 폐기 — dedup을 (num, page) 인스턴스 단위로 완화 (PDFViewer#14:
 //        합본 논문·부록 번호 재시작 보존. 같은 페이지 중복만 score 선택). 정렬을 page→num 자연순으로 결정화.
 //        소비자 식별 키는 (num, page) — Margin은 fig{num}-p{page} ID로 이미 대응.
@@ -49,7 +55,6 @@ const CAP_RE  = /^(figure|fig)\s*\.?\s*(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)\s*([.
 // 공백 제거 버전: PDF.js가 small-caps를 "F IGURE 2"처럼 조각내는 경우 대응
 const CAP_RE2 = /^(figure|fig)\.?(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)([.:|]|$)/i;
 const S = 2.2;             // 분석/크롭 렌더 스케일 (px per pt)
-const MAX_PAGES = 60;      // 분석할 최대 페이지 수
 
 /* ===================== 기하 유틸 ===================== */
 const ox = (a, b) => Math.min(a.left + a.w, b.left + b.w) - Math.max(a.left, b.left);
@@ -424,7 +429,7 @@ function detectPage(pg, lines, dom, grid, dbg) {
 async function extract(data, opts = {}) {
   const onProgress = opts.onProgress || (() => {});
   const dbg = opts.debug || (() => {});
-  const maxPages = opts.maxPages || MAX_PAGES;
+  const maxPages = opts.maxPages;   // 미지정 시 전체 페이지 스캔 (기본 상한 없음)
   /* 협조적 취소 (PDFViewer#12): 페이지 단위로 signal 체크 — 문서 교체 시 호스트가 abort */
   const checkAborted = () => {
     if (opts.signal && opts.signal.aborted)
@@ -440,7 +445,7 @@ async function extract(data, opts = {}) {
     title = (meta.info && meta.info.Title && meta.info.Title.trim()) || null;
   } catch (e) { /* 무시 */ }
 
-  const nPages = Math.min(pdf.numPages, maxPages);
+  const nPages = maxPages ? Math.min(pdf.numPages, maxPages) : pdf.numPages;
   /* 1차: 전체 텍스트 → 라인/도미넌트 폰트 */
   const pageData = [];
   const fontW = {};
@@ -470,23 +475,41 @@ async function extract(data, opts = {}) {
       const vp = pd.page.getViewport({ scale: S });
       canvas = document.createElement("canvas");
       canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
-      await pd.page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+      /* abort 시 진행 중 렌더도 즉시 취소 — 페이지 경계까지 안 기다림 (PDFViewer#12 in-flight).
+       * 렌더 시작 직전 재확인: 앞선 await(getImageBoxes 등) 도중 이미 abort된 경우, 그 abort는
+       * 아래 리스너보다 먼저 방출돼 onAbort가 안 불리므로 여기서 걸러 불필요한 렌더를 건너뛴다. */
+      checkAborted();
+      const task = pd.page.render({ canvasContext: canvas.getContext("2d"), viewport: vp });
+      const onAbort = () => task.cancel();
+      if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        await task.promise;
+      } catch (e) {
+        if (opts.signal && opts.signal.aborted)
+          throw new DOMException("figure 추출이 취소됨", "AbortError");
+        throw e;   // 취소 아닌 실제 렌더 오류는 그대로 전파
+      } finally {
+        if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      }
     }
     const grid = makeInk(canvas);
     const figs = detectPage(pd, pd.lines, dom, grid, dbg);
-    for (const f of figs) { f.canvas = canvas; allFigs.push(f); }
+    /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
+     * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 경쟁은 같은 페이지 안에서만 발생하므로
+     * dedup·최소 크기 필터를 페이지 단위로 끝내고, 살아남은 figure만 즉시 크롭해 보관한다.
+     * 페이지 전체 캔버스는 여기서 참조를 버림 — 스캔 중 동시 상주 최대 1장 (PDFViewer#12). */
+    const best = {};
+    for (const f of figs) {
+      const score = (f.raster_ ? 1e9 : 0) + f.h_;
+      if (!(f.num in best) || score > best[f.num].score) best[f.num] = { score, f };
+    }
+    for (const { f } of Object.values(best)) {
+      if ((f.x1 - f.x0) < 30 || (f.y1 - f.y0) < 30) continue;
+      f.cropCanvas = makeCrop(canvas, f);
+      allFigs.push(f);
+    }
   }
-  /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
-   * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 같은 페이지의 중복 후보만
-   * 더 그럴듯한 것(래스터 포함 > 큰 높이)을 선택. 소비자 식별 키 = (num, page). */
-  const best = {};
-  for (const f of allFigs) {
-    const key = f.num + "@" + f.page;
-    const score = (f.raster_ ? 1e9 : 0) + f.h_;
-    if (!(key in best) || score > best[key].score) best[key] = { score, f };
-  }
-  const figures = Object.values(best).map(v => v.f)
-    .filter(f => (f.x1 - f.x0) >= 30 && (f.y1 - f.y0) >= 30)
+  const figures = allFigs
     .sort((a, b) => a.page - b.page ||
                     String(a.num).localeCompare(String(b.num), undefined, { numeric: true }));
   for (const f of figures) {
@@ -512,17 +535,20 @@ async function extract(data, opts = {}) {
 }
 
 /* ===================== 크롭 헬퍼 ===================== */
-function cropCanvas(f) {
+/* 스캔 루프 안에서 페이지 캔버스로부터 그림 영역만 잘라낸다 — 페이지 캔버스는 보관하지 않는다 (#12) */
+function makeCrop(pageCanvas, f) {
   const cw = f.x1 - f.x0, ch = f.y1 - f.y0;
   const c2 = document.createElement("canvas");
   c2.width = cw; c2.height = ch;
   const ctx = c2.getContext("2d");
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cw, ch);
-  ctx.drawImage(f.canvas, f.x0, f.y0, cw, ch, 0, 0, cw, ch);
+  ctx.drawImage(pageCanvas, f.x0, f.y0, cw, ch, 0, 0, cw, ch);
   return c2;
 }
-const cropDataURL = f => cropCanvas(f).toDataURL("image/png");
-const cropBlob = f => new Promise(res => cropCanvas(f).toBlob(res, "image/png"));
+/* v2.5.1: 크롭은 스캔 중 이미 생성됨 — 아래 셋은 f.cropCanvas를 읽는 접근자 (시그니처 불변) */
+const cropCanvas = f => f.cropCanvas;
+const cropDataURL = f => f.cropCanvas.toDataURL("image/png");
+const cropBlob = f => new Promise(res => f.cropCanvas.toBlob(res, "image/png"));
 
 return { VERSION, extract, cropCanvas, cropDataURL, cropBlob, isCaption, buildLines };
 

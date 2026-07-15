@@ -475,7 +475,10 @@ async function extract(data, opts = {}) {
       const vp = pd.page.getViewport({ scale: S });
       canvas = document.createElement("canvas");
       canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
-      /* abort 시 진행 중 렌더도 즉시 취소 — 페이지 경계까지 안 기다림 (PDFViewer#12 in-flight) */
+      /* abort 시 진행 중 렌더도 즉시 취소 — 페이지 경계까지 안 기다림 (PDFViewer#12 in-flight).
+       * 렌더 시작 직전 재확인: 앞선 await(getImageBoxes 등) 도중 이미 abort된 경우, 그 abort는
+       * 아래 리스너보다 먼저 방출돼 onAbort가 안 불리므로 여기서 걸러 불필요한 렌더를 건너뛴다. */
+      checkAborted();
       const task = pd.page.render({ canvasContext: canvas.getContext("2d"), viewport: vp });
       const onAbort = () => task.cancel();
       if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });

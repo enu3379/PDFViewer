@@ -38,7 +38,7 @@ describe('figure engine integration', () => {
           bboxPt: { x0: 10, y0: 20, x1: 110, y1: 220 },
           captionBoxPt: { x0: 10, y0: 225, x1: 110, y1: 250 },
           bboxPx: { x0: 22, y0: 44, x1: 242, y1: 484 },
-          canvas: {} as HTMLCanvasElement
+          cropCanvas: {} as HTMLCanvasElement
         }
       ]
     };

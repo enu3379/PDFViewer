@@ -65,7 +65,7 @@ const figure = (page: number, num = String(page)): EngineFigure => ({
   bboxPt: { x0: 0, y0: 0, x1: 10, y1: 10 },
   captionBoxPt: { x0: 0, y0: 10, x1: 10, y1: 12 },
   bboxPx: { x0: 0, y0: 0, x1: 22, y1: 22 },
-  canvas: {} as HTMLCanvasElement
+  cropCanvas: {} as HTMLCanvasElement
 });
 
 const result = (figures: EngineFigure[]): EngineResult => ({

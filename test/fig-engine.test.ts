@@ -58,4 +58,45 @@ describe('figure engine integration', () => {
     expect(seed).not.toHaveProperty('doc');
     expect(seed).not.toHaveProperty('captionAnchor');
   });
+
+  it('preserves figure numbers reused on different pages', () => {
+    const canvas = {} as HTMLCanvasElement;
+    const box = { x0: 10, y0: 20, x1: 110, y1: 220 };
+    const captionBox = { x0: 10, y0: 225, x1: 110, y1: 250 };
+    const pixelBox = { x0: 22, y0: 44, x1: 242, y1: 484 };
+    const result: EngineResult = {
+      title: 'Paper with per-chapter numbering',
+      numPages: 20,
+      engineVersion: 'next',
+      figures: [
+        {
+          num: '1',
+          page: 2,
+          confidence: 0.9,
+          caption: 'Figure 1. Chapter one result',
+          bboxPt: box,
+          captionBoxPt: captionBox,
+          bboxPx: pixelBox,
+          canvas
+        },
+        {
+          num: '1',
+          page: 18,
+          confidence: 0.8,
+          caption: 'Figure 1. Chapter two result',
+          bboxPt: box,
+          captionBoxPt: captionBox,
+          bboxPx: pixelBox,
+          canvas
+        }
+      ]
+    };
+
+    const seeds = toFigureEntries(result, () => 800);
+
+    expect(seeds.map(({ id, num, page }) => ({ id, num, page }))).toEqual([
+      { id: 'fig1-p2', num: '1', page: 2 },
+      { id: 'fig1-p18', num: '1', page: 18 }
+    ]);
+  });
 });

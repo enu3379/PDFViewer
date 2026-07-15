@@ -60,7 +60,7 @@ describe('figure engine integration', () => {
   });
 
   it('preserves figure numbers reused on different pages', () => {
-    const canvas = {} as HTMLCanvasElement;
+    const cropCanvas = {} as HTMLCanvasElement;
     const box = { x0: 10, y0: 20, x1: 110, y1: 220 };
     const captionBox = { x0: 10, y0: 225, x1: 110, y1: 250 };
     const pixelBox = { x0: 22, y0: 44, x1: 242, y1: 484 };
@@ -68,6 +68,7 @@ describe('figure engine integration', () => {
       title: 'Paper with per-chapter numbering',
       numPages: 20,
       engineVersion: 'next',
+      suspectedMissing: [],
       figures: [
         {
           num: '1',
@@ -77,7 +78,7 @@ describe('figure engine integration', () => {
           bboxPt: box,
           captionBoxPt: captionBox,
           bboxPx: pixelBox,
-          canvas
+          cropCanvas
         },
         {
           num: '1',
@@ -87,7 +88,7 @@ describe('figure engine integration', () => {
           bboxPt: box,
           captionBoxPt: captionBox,
           bboxPx: pixelBox,
-          canvas
+          cropCanvas
         }
       ]
     };

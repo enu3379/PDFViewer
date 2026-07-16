@@ -31,7 +31,9 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.5.1";
+const VERSION = "2.6.0";
+// 2.6.0: Extended Data("ED.N")·Supplementary/선행 S("S.N") 캡션 감지 추가 [계약 무변경].
+//        전용 정규식과 isCaption num 매핑을 확장. 기존 "Figure N" 출력·구분자 방어 불변.
 // 2.5.1: 메모리 패치 (PDFViewer#12) — ① 페이지 스캔 상한 기본값(60) 제거: 미지정 시 전체 페이지 스캔,
 //        opts.maxPages는 선택적 상한으로 유지. ② figure.canvas(페이지 전체 렌더 보관) 폐지 → 스캔 중
 //        즉시 크롭한 figure.cropCanvas로 대체: 페이지 캔버스 동시 상주 최대 1장, dedup·크기 필터를
@@ -50,7 +52,13 @@ const VERSION = "2.5.1";
 // 2.1.1: pdf.js 3.11.174 → 4.10.38 (Margin과 버전 일치). 알고리즘 무변경
 
 /* ===================== 상수 (pt 단위 기준) ===================== */
-// 캡션 정규식: "Figure 1:" "Fig. 2." "Fig. 3 |" "FIGURE 4" "Figure A.1:" "Figure IV." 등
+// 확장 캡션 정규식: "Extended Data Fig. 1" / "Supplementary Figure 1" / "Suppl. Fig 1"
+const SPECIAL_CAP_RE  = /^(extended data|supplementary|suppl\.)\s+(?:figure|fig)\s*\.?\s*(\d+)\s*([.:|]|$)/i;
+const SPECIAL_CAP_RE2 = /^(extendeddata|supplementary|suppl\.)(?:figure|fig)\.?(\d+)([.:|]|$)/i;
+// PLOS 선행형: "S1 Fig. ..." / "S12 Figure: ..."
+const LEADING_S_CAP_RE  = /^S(\d+)\s+(?:figure|fig)\s*\.?\s*([.:|]|$)/i;
+const LEADING_S_CAP_RE2 = /^S(\d+)(?:figure|fig)\.?([.:|]|$)/i;
+// 기본 캡션 정규식: "Figure 1:" "Fig. 2." "Fig. 3 |" "FIGURE 4" "Figure A.1:" "Figure IV." 등
 const CAP_RE  = /^(figure|fig)\s*\.?\s*(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)\s*([.:|]|$)/i;
 // 공백 제거 버전: PDF.js가 small-caps를 "F IGURE 2"처럼 조각내는 경우 대응
 const CAP_RE2 = /^(figure|fig)\.?(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)([.:|]|$)/i;
@@ -111,19 +119,30 @@ function buildLines(tc, pageH) {
 }
 
 /* ===================== 캡션 판별 ===================== */
-function isCaption(line) {
-  let m = CAP_RE.exec(line.s);
-  if (!m) {
-    const stripped = line.s.replace(/\s+/g, "");
-    m = CAP_RE2.exec(stripped);
-    if (!m) return null;
-    const sep = m[3] || "";
-    if (![".", ":", "|"].includes(sep) && stripped.length > 12) return null;
-    return m[2].toUpperCase();
+function matchCaption(s, compact) {
+  let m = (compact ? SPECIAL_CAP_RE2 : SPECIAL_CAP_RE).exec(s);
+  if (m) {
+    const prefix = m[1].toLowerCase().startsWith("extended") ? "ED" : "S";
+    return { num: `${prefix}.${m[2]}`, sep: m[3] || "" };
   }
-  const sep = m[3] || "";
-  if (![".", ":", "|"].includes(sep) && line.s.length > 14) return null;
-  return m[2].toUpperCase();
+  m = (compact ? LEADING_S_CAP_RE2 : LEADING_S_CAP_RE).exec(s);
+  if (m) return { num: `S.${m[1]}`, sep: m[2] || "" };
+  m = (compact ? CAP_RE2 : CAP_RE).exec(s);
+  if (m) return { num: m[2].toUpperCase(), sep: m[3] || "" };
+  return null;
+}
+
+function isCaption(line) {
+  let match = matchCaption(line.s, false);
+  if (!match) {
+    const stripped = line.s.replace(/\s+/g, "");
+    match = matchCaption(stripped, true);
+    if (!match) return null;
+    if (![".", ":", "|"].includes(match.sep) && stripped.length > 12) return null;
+    return match.num;
+  }
+  if (![".", ":", "|"].includes(match.sep) && line.s.length > 14) return null;
+  return match.num;
 }
 
 /* 위/아래 인접 줄(문단 이웃) 존재 여부 — 본문 문단 판별에 사용 */

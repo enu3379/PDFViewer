@@ -31,7 +31,25 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.8.0";
+const VERSION = "2.9.3";
+// 2.9.3: [계약 무변경] 줄끝 종결형 길이 가드에서 접두어 길이 제외 — "Extended Data Fig. 1"처럼
+//        번호 뒤 구두점 없이 끝나는 접두 계열 라벨이 접두어("Extended Data " 14자)만으로 14자
+//        예산을 소진해 거부되던 문제. 가드는 "라벨에 딸린 텍스트 분량"을 재려는 것이므로
+//        matchCaption이 lead(접두어 길이)를 돌려주고 예산에서 뺀다. 맨 Figure N 계열은 무변경.
+// 2.9.2: [계약 무변경] 임베디드 캡션 앵커 — 나란한 figure의 캡션들이 같은 baseline에 있고 조각 간
+//        x-갭이 8pt 미만이라 buildLines가 한 라인으로 합쳐 앞 번호만 앵커되던 경우, 그 라인을
+//        라벨 조각 기준으로 세그먼트 분해해 형제 앵커를 만든다. 발동은 "이미 hard 앵커로 인정된
+//        라인"에 한정해 본문 상호참조 오탐을 원천 차단하고, buildLines의 8pt 분리 규칙과 라인
+//        geometry는 건드리지 않는다. 형제끼리는 서로의 라벨 x를 확장 한계로 삼는다. Aegaeon Fig15/16.
+// 2.9.1: [계약 무변경] soft 캡션 앵커 — 번호 뒤 구분자가 없는 표기("Fig. 1 Experimental roadmap …",
+//        Wiley 자간 분리 "F I G U R E 1 Bar chart …")를 후보로 모으고, 문서 수준 게이트
+//        (hard 앵커 총수 0 + 같은 라벨폼 2회 이상)를 통과한 문서에서만 앵커로 승격한다.
+//        본문 상호참조("Figure 5 shows …")는 번호 뒤 본문이 대문자로 시작할 것을 요구해 배제.
+//        기존 hard 경로(isCaption·CAP_RE 계열·hard stitch)는 무변경. Robertson·Fauzi·PAH·Kim 미탐지 해소.
+// 2.9.0: [계약 무변경] 서브패널 라벨 면제 — figure 내부의 "(a) …" 서브캡션 행(같은 baseline 타일
+//        또는 인라인 나열, 같은 계열 오름 연속 마커)이 dom 폰트·본문 폭이어도, 캡션 바로 위 "첫"
+//        블록에 한해 BODY stop에서 면제한다. 면제는 빈 결과만 뒤집을 수 있고 기존 영역을 넓히지
+//        못한다(첫 블록 한정 + all-exempt + 24pt 인접). Ju Fig3·Aegaeon Fig12·ICLR B.1 미탐지 해소.
 // 2.8.0: [계약 무변경] hard caption anchor를 page prefilter와 탐지에서 공유하고,
 //        up/down/left/right 후보를 공통 채점·선택기에 통합. side column-profile scan과
 //        본문·캡션·margin stopper, frame/raster 보호, sliver/tail tightening을 추가.
@@ -60,7 +78,9 @@ const VERSION = "2.8.0";
 
 /* ===================== 상수 (pt 단위 기준) ===================== */
 // 확장 캡션 정규식: "Extended Data Fig. 1" / "Supplementary Figure 1" / "Suppl. Fig 1"
-const SPECIAL_CAP_RE  = /^(extended data|supplementary|suppl\.)\s+(?:figure|fig)\s*\.?\s*(\d+)\s*([.:|]|$)/i;
+/* 접두어를 공백까지 포함해 캡처한다 — 줄끝 종결형 길이 가드가 접두어 길이에 잠식되지 않도록
+ * matchCaption이 lead(접두어가 차지한 문자 수)를 함께 돌려주기 위함 (v2.9.3). */
+const SPECIAL_CAP_RE  = /^((?:extended data|supplementary|suppl\.)\s+)(?:figure|fig)\s*\.?\s*(\d+)\s*([.:|]|$)/i;
 const SPECIAL_CAP_RE2 = /^(extendeddata|supplementary|suppl\.)(?:figure|fig)\.?(\d+)([.:|]|$)/i;
 // PLOS 선행형: "S1 Fig. ..." / "S12 Figure: ..."
 const LEADING_S_CAP_RE  = /^S(\d+)\s+(?:figure|fig)\s*\.?\s*([.:|]|$)/i;
@@ -69,6 +89,22 @@ const LEADING_S_CAP_RE2 = /^S(\d+)(?:figure|fig)\.?([.:|]|$)/i;
 const CAP_RE  = /^(figure|fig)\s*\.?\s*(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)\s*([.:|]|$)/i;
 // 공백 제거 버전: PDF.js가 small-caps를 "F IGURE 2"처럼 조각내는 경우 대응
 const CAP_RE2 = /^(figure|fig)\.?(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)([.:|]|$)/i;
+/* ---- soft 캡션 (v2.9.1): 번호 뒤 구분자가 없는 표기 "Fig. 1 Experimental roadmap …".
+ * RSC·Springer·Wiley가 널리 쓰지만 본문 상호참조("Figure 5 shows …")와 형태가 같아, 후보로만
+ * 모아두고 문서 수준 게이트(promoteSoftAnchors)를 통과한 것만 앵커로 승격한다. ---- */
+const SOFT_CAP_RE  = /^(figure|fig)\s*\.?\s*(\d+(?:\.\d+)?|[A-D]\.\d+)(.*)$/i;
+const SOFT_CAP_RE2 = /^(figure|fig)\.?(\d+(?:\.\d+)?|[A-D]\.\d+)(.*)$/i;
+/* 번호 뒤: (선택)소문자 패널 라벨 "a" "a–c" → 공백 → 대문자·괄호·따옴표로 캡션 본문 시작.
+ * 이 한 규칙이 본문 상호참조 배제의 전부다 — "shows/illustrates/presents/depicts"가 전부
+ * 소문자로 시작하고, "Fig. 6a is glass-bottomed"·번호 뒤 ,); 도 같은 조건에서 탈락한다.
+ * 라벨부(/i)와 본문 머리 판정을 분리해야 한다: /i를 한 정규식에 걸면 [A-Z]가 소문자까지 먹는다. */
+const SOFT_BODY_RE  = /^(?:[a-z](?:\s*[–—-]\s*[a-z])*)?\s+[A-Z(\[“‘"•]/;
+const SOFT_BODY_RE2 = /^(?:[a-z](?:[–—-][a-z])*)?[A-Z(\[“‘"•]/;
+/* 공백 제거 경로는 자간 분리 라벨(Wiley "F I G U R E")에만 허용 — 무제한 허용하면
+ * "Figure 2B is a composite" 류가 어절 경계 소실로 통과한다. */
+const SOFT_SPACED_RE = /^(?:[A-Za-z]\s){3,}/;
+const SOFT_DOC_HARD_MAX = 0;   // 문서의 hard 앵커 총수 상한 (초과 시 soft 전량 기각)
+const SOFT_FORM_MIN     = 2;   // 같은 라벨폼이 문서 내 반복돼야 하는 최소 횟수
 const S = 2.2;             // 분석/크롭 렌더 스케일 (px per pt)
 
 /* ===================== 기하 유틸 ===================== */
@@ -119,23 +155,28 @@ function buildLines(tc, pageH) {
       s = s.trim();
       if (!s) continue;
       const main = ch.reduce((a, b) => a.w >= b.w ? a : b);
-      lines.push({ left, w: right - left, top, h: bot - top, s, font: main.font });
+      /* frags: 이 라인을 구성한 조각 배열 (v2.9.2 임베디드 캡션 앵커용).
+       * left/w/top/h/s/font는 그대로 — 라인 geometry가 바뀌면 stopper 폭 조건·dom 폰트 가중·yPre가
+       * 전부 흔들리므로 조각 정보만 덧붙이고 기하는 한 값도 건드리지 않는다. */
+      lines.push({ left, w: right - left, top, h: bot - top, s, font: main.font, frags: ch });
     }
   }
   return lines;
 }
 
 /* ===================== 캡션 판별 ===================== */
+/* lead = 접두 계열("Extended Data " 등)이 차지한 문자 수. 줄끝 종결형 길이 가드는
+ * "라벨 말고 딸린 텍스트가 얼마나 되나"를 재려는 것이므로 접두어는 예산에서 빼야 한다 (v2.9.3). */
 function matchCaption(s, compact) {
   let m = (compact ? SPECIAL_CAP_RE2 : SPECIAL_CAP_RE).exec(s);
   if (m) {
-    const prefix = m[1].toLowerCase().startsWith("extended") ? "ED" : "S";
-    return { num: `${prefix}.${m[2]}`, sep: m[3] || "" };
+    const prefix = m[1].trim().toLowerCase().startsWith("extended") ? "ED" : "S";
+    return { num: `${prefix}.${m[2]}`, sep: m[3] || "", lead: m[1].length };
   }
   m = (compact ? LEADING_S_CAP_RE2 : LEADING_S_CAP_RE).exec(s);
-  if (m) return { num: `S.${m[1]}`, sep: m[2] || "" };
+  if (m) return { num: `S.${m[1]}`, sep: m[2] || "", lead: 0 };
   m = (compact ? CAP_RE2 : CAP_RE).exec(s);
-  if (m) return { num: m[2].toUpperCase(), sep: m[3] || "" };
+  if (m) return { num: m[2].toUpperCase(), sep: m[3] || "", lead: 0 };
   return null;
 }
 
@@ -145,18 +186,46 @@ function isCaption(line) {
     const stripped = line.s.replace(/\s+/g, "");
     match = matchCaption(stripped, true);
     if (!match) return null;
-    if (![".", ":", "|"].includes(match.sep) && stripped.length > 12) return null;
+    if (![".", ":", "|"].includes(match.sep) && stripped.length - match.lead > 12) return null;
     return match.num;
   }
-  if (![".", ":", "|"].includes(match.sep) && line.s.length > 14) return null;
+  if (![".", ":", "|"].includes(match.sep) && line.s.length - match.lead > 14) return null;
   return match.num;
+}
+
+/* isCaption이 거부한 라인 중 "번호 뒤 구분자 없는 캡션"만 골라낸다 (v2.9.1).
+ * 반환 {num, form} — form은 문서 내 라벨 표기 관습 키("fig"|"figure"|"spaced").
+ * isCaption과 상호배타적: 구분자가 있으면 SOFT_BODY_RE의 공백 요구에서 탈락한다.
+ * isCaption의 길이 가드(12/14자)는 soft 경로에 적용하지 않는다 — 그 자리를
+ * SOFT_BODY_RE(본문 대문자 시작)와 SOFT_SPACED_RE(자간 분리 한정)가 대신한다. */
+function softCaptionOf(line) {
+  let m = SOFT_CAP_RE.exec(line.s);
+  if (m && SOFT_BODY_RE.test(m[3]))
+    return { num: m[2].toUpperCase(), form: m[1].toLowerCase() };
+  if (!SOFT_SPACED_RE.test(line.s)) return null;
+  m = SOFT_CAP_RE2.exec(line.s.replace(/\s+/g, ""));
+  if (m && SOFT_BODY_RE2.test(m[3]))
+    return { num: m[2].toUpperCase(), form: "spaced" };
+  return null;
 }
 
 const HARD_STITCH_NUM_RE = /^(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)\s*([.:|])(?!\d)(?:\s*.*)?$/i;
 const STITCH_GAP_PT = 18;
 
+/* slots(라인 순서)를 걷되 각 라인 뒤에 그 라인에서 분해된 임베디드 앵커를 이어 붙인다.
+ * anchors 순서는 detectPage의 밴드 한계(exL/exR)·otherCaps가 소비하므로 결정적이어야 한다. */
+function assembleAnchors(slots, embedded) {
+  const out = [];
+  for (let i = 0; i < slots.length; i++) {
+    if (slots[i]) out.push(slots[i]);
+    const emb = embedded && embedded.get(i);
+    if (emb) for (const a of emb) out.push(a);
+  }
+  return out;
+}
+
 /* buildLines의 8pt 컬럼 보호로 Figure/Fig.와 번호가 갈라진 경우만 hard anchor로 복원한다. */
-function captionAnchors(lines) {
+function captionAnchors(lines, dbg) {
   const slots = new Array(lines.length);
   const ownerByPart = new Map();
   const infoByAnchor = new Map();
@@ -187,6 +256,62 @@ function captionAnchors(lines) {
       parts: [line],
       labelBox: boxOf([line])
     });
+  }
+
+  /* 1b) 임베디드 캡션 앵커 (v2.9.2) — 나란한 figure의 캡션들이 같은 baseline에 있고 조각 간
+   * x-갭이 8pt 미만이면 buildLines가 한 라인으로 합쳐 앞 번호만 앵커된다 (Aegaeon p12:
+   * "Figure 14. … across Figure 15. Left: … Figure 16. …"). 그 라인을 라벨 조각 기준으로
+   * 세그먼트 분해해 형제 앵커를 만든다.
+   * ★ 발동 조건을 "이미 loop-1이 hard 앵커로 인정한 라인"으로 한정하는 것이 핵심이다 —
+   *   모든 라인의 조각을 훑으면 본문 상호참조("… (Figure 1J). Notably, Figure 1K presents …")가
+   *   가짜 앵커가 된다 (Wei-2026 p5/p10, Weiss p6에서 실측).
+   * buildLines의 8pt 분리 규칙 자체는 건드리지 않는다 (Aslin 유래 앵커 보호). */
+  const embedded = new Map();
+  const hardLabelOf = frag => {
+    const m = matchCaption(frag.s.trim(), false);
+    return m && [".", ":", "|"].includes(m.sep) ? m.num.toUpperCase() : null;
+  };
+  const joinFrags = fr => {
+    let s = "", prev = null;
+    for (const f of fr) { if (prev !== null && f.left - prev > 1) s += " "; s += f.s; prev = f.left + f.w; }
+    return s.trim();
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (slots[i] !== line || !line.frags || line.frags.length < 2) continue;
+    const info0 = infoByAnchor.get(line);
+    if (!info0 || !info0.hard) continue;
+    const labelIdx = [];
+    for (let k = 0; k < line.frags.length; k++)
+      if (hardLabelOf(line.frags[k])) labelIdx.push(k);
+    if (labelIdx.length < 2 || labelIdx[0] !== 0) continue;
+
+    const segs = labelIdx.map((start, n) =>
+      line.frags.slice(start, n + 1 < labelIdx.length ? labelIdx[n + 1] : line.frags.length));
+    const made = segs.map(fr => {
+      const main = fr.reduce((a, b) => a.w >= b.w ? a : b);
+      return { ...boxOf(fr), s: joinFrags(fr), font: main.font };
+    });
+    /* 병합 라인은 첫 캡션이 소유한다 — 형제가 이 물리 라인을 다시 캡션·본문으로 오해하지 않게. */
+    infoByAnchor.delete(line);
+    ownerByPart.set(line, made[0]);
+    slots[i] = made[0];
+    embedded.set(i, made.slice(1));
+    made.forEach((a, n) => {
+      ownerByPart.set(a, a);
+      infoByAnchor.set(a, {
+        num: hardLabelOf(segs[n][0]),
+        hard: true,
+        stitched: false,
+        embedded: true,
+        parts: [line],
+        labelBox: boxOf([segs[n][0]]),
+        sibL: n > 0 ? made[n].left : null,                       // 자기 라벨 left = 왼쪽 형제와의 경계
+        sibR: n + 1 < made.length ? made[n + 1].left : null      // 다음 라벨 left = 오른쪽 경계
+      });
+    });
+    if (dbg) dbg(`  [split] line T${line.top.toFixed(0)} -> ${made.length} caps ` +
+      made.map(a => infoByAnchor.get(a).num).join("/"));
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -234,7 +359,72 @@ function captionAnchors(lines) {
       labelBox: boxOf([prefix, numeric])
     });
   }
-  return { anchors: slots.filter(Boolean), ownerByPart, infoByAnchor };
+
+  /* 3) soft 후보 수집 (v2.9.1) — slots/ownerByPart/infoByAnchor에는 넣지 않는다.
+   *    승격 여부는 문서 전체를 보는 promoteSoftAnchors가 결정한다. */
+  const softSlots = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (ownerByPart.has(line)) continue;          // 이미 hard 앵커이거나 그 조각
+    const soft = softCaptionOf(line);
+    if (soft) softSlots.push({ index: i, line, num: soft.num, form: soft.form });
+  }
+  /* slots(희소 배열)를 노출하는 이유: 승격 시 slots[index] 기입 후 filter(Boolean) 재실행만으로
+   * 라인 순서가 보존된다 — anchors 순서는 detectPage의 밴드 한계·otherCaps가 소비하므로 결정적이어야 한다. */
+  return { anchors: assembleAnchors(slots, embedded), ownerByPart, infoByAnchor,
+           slots, embedded, softSlots,
+           hardCount: slots.filter(Boolean).length +
+             [...embedded.values()].reduce((n, a) => n + a.length, 0) };
+}
+
+/* 1차 패스 종료 후 문서 전체를 보고 soft 앵커 승격 여부를 결정한다 (v2.9.1).
+ * 게이트: ① 문서 hard 앵커 총수 <= SOFT_DOC_HARD_MAX ② 같은 라벨폼이 SOFT_FORM_MIN회 이상.
+ * 근거: 한 문서는 보통 캡션 표기 관습을 하나만 쓴다 — hard 앵커가 이미 나오는 문서의 soft 후보는
+ * 거의 전부 본문 상호참조이고, hard 앵커가 없는 문서의 그것은 거의 전부 진짜 캡션이다(코퍼스 실측).
+ * 승격된 앵커는 hard:false·parts 1개로 기존의 "구분자 없는 앵커"와 구조적으로 동일하므로
+ * detectPage의 후보 생성·채점·선택 경로는 한 줄도 바뀌지 않는다. */
+function promoteSoftAnchors(pageData, dbg) {
+  let hardTotal = 0, softTotal = 0;
+  const formCount = new Map();
+  for (const pd of pageData) {
+    hardTotal += pd.captionData.hardCount;
+    for (const c of pd.captionData.softSlots) {
+      softTotal++;
+      formCount.set(c.form, (formCount.get(c.form) || 0) + 1);
+    }
+  }
+  if (!softTotal) return;
+  const forms = [...formCount].map(([f, n]) => `${f}:${n}`).join(",");
+  const gateOk = hardTotal <= SOFT_DOC_HARD_MAX;
+  dbg(`[doc] SOFT gate hard=${hardTotal} soft=${softTotal} forms=${forms} pass=${gateOk ? 1 : 0}`);
+  if (!gateOk) return;
+
+  for (const pd of pageData) {
+    const cd = pd.captionData;
+    let promoted = 0;
+    for (const c of cd.softSlots) {
+      const reps = formCount.get(c.form);
+      if (reps < SOFT_FORM_MIN) {
+        dbg(`[doc] SOFT reject p${pd.num} num=${c.num} form=${c.form} reason=form-rep(${reps})`);
+        continue;
+      }
+      cd.slots[c.index] = c.line;
+      cd.ownerByPart.set(c.line, c.line);
+      cd.infoByAnchor.set(c.line, {
+        num: c.num,
+        hard: false,      // 구분자가 없으므로 hard 문법이 아니다 (hardLong 경로 비진입)
+        stitched: false,
+        soft: true,
+        form: c.form,
+        parts: [c.line],
+        labelBox: { left: c.line.left, w: c.line.w, top: c.line.top, h: c.line.h }
+      });
+      promoted++;
+      dbg(`[doc] SOFT promote p${pd.num} num=${c.num} form=${c.form}` +
+          ` s=${JSON.stringify(c.line.s.slice(0, 50))}`);
+    }
+    if (promoted) cd.anchors = assembleAnchors(cd.slots, cd.embedded);   // 라인 순서 보존 재구성
+  }
 }
 
 /* 위/아래 인접 줄(문단 이웃) 존재 여부 — 본문 문단 판별에 사용 */
@@ -250,6 +440,74 @@ function neighborsOf(u, lines) {
     }
   }
   return { above, below };
+}
+
+/* ===================== 서브패널 라벨 판별 (v2.9.0) ===================== */
+/* figure 내부의 "(a) …" 서브캡션은 dom 폰트 + 본문 폭 + 상하 이웃 조건을 만족해 stopper로
+ * 오인된다 (Ju Fig3, Aegaeon Fig12, ICLR B.1이 이 오인으로 CHOSE none → figure 소실).
+ * 여기서 찾은 라인은 픽셀 블록 스캔의 "캡션 바로 위 첫 블록"에 한해 BODY stop에서 면제된다.
+ * 판별: 같은 baseline의 stopper 타일들이 각각 (a)(b)…로 시작하거나 한 줄 안에 (a)…(b)…가
+ * 인라인 나열되고, 마커가 같은 계열(a/A/1/i)의 오름 연속이며 첫 마커가 계열의 0일 것.
+ * dom 폰트·같은 좌단의 문단 이웃이 바로 위에 있으면 본문 열거 문단으로 보고 제외한다. */
+const SUBPANEL_MARK_RE = /\(\s*([a-zA-Z]|[ivx]{2,4}|\d{1,2})\s*\)/g;
+const SUBPANEL_HEAD_RE = /^\(\s*([a-zA-Z]|[ivx]{2,4}|\d{1,2})\s*\)/;
+const SUBPANEL_ROMAN = { i: 0, ii: 1, iii: 2, iv: 3, v: 4, vi: 5, vii: 6, viii: 7, ix: 8, x: 9 };
+function subpanelSeqOk(tokens) {
+  if (tokens.length < 2 || tokens.some(t => t == null)) return false;
+  const ordIn = (fam, t) => {
+    if (fam === "a") return /^[a-z]$/.test(t) ? t.charCodeAt(0) - 97 : -1;
+    if (fam === "A") return /^[A-Z]$/.test(t) ? t.charCodeAt(0) - 65 : -1;
+    if (fam === "1") return /^\d+$/.test(t) ? +t - 1 : -1;
+    return t in SUBPANEL_ROMAN ? SUBPANEL_ROMAN[t] : -1;   // fam "i"
+  };
+  /* "(i)"가 로마자인지 알파벳인지는 계열 전체가 결정한다 — 어느 한 계열로든 0부터 오름 연속이면 통과 */
+  return ["a", "A", "1", "i"].some(fam => tokens.every((t, k) => ordIn(fam, t) === k));
+}
+function subpanelStoppers(lines, stoppers, dom) {
+  const exempt = new Set();
+  const stopList = [...stoppers].sort((a, b) => (a.top + a.h) - (b.top + b.h));
+  /* 같은 baseline 행으로 클러스터링 (buildLines와 동일한 허용오차) */
+  const rows = [];
+  for (const u of stopList) {
+    const r = rows[rows.length - 1];
+    if (r && Math.abs((u.top + u.h) - r.bl) < Math.max(2, u.h * 0.45)) r.us.push(u);
+    else rows.push({ bl: u.top + u.h, us: [u] });
+  }
+  const paragraphAbove = u => lines.some(v =>
+    v !== u && v.font === dom && Math.abs(v.left - u.left) <= 4 &&
+    (u.top + u.h) - (v.top + v.h) >= 0.85 * u.h &&
+    (u.top + u.h) - (v.top + v.h) <= 1.95 * u.h);
+  for (const row of rows) {
+    row.us.sort((a, b) => a.left - b.left);
+    let tokens;
+    if (row.us.length > 1) {
+      /* 타일 형: 각 stopper가 줄머리 마커로 시작 — (a) xxx | (b) xxx | (c) xxx */
+      tokens = row.us.map(u => { const m = SUBPANEL_HEAD_RE.exec(u.s); return m ? m[1] : null; });
+    } else {
+      /* 인라인 형: 한 줄 안에 (a) … (b) … — 줄머리에서 시작할 때만 */
+      const u = row.us[0];
+      if (!SUBPANEL_HEAD_RE.test(u.s)) continue;
+      tokens = [...u.s.matchAll(SUBPANEL_MARK_RE)].map(m => m[1]);
+    }
+    if (!subpanelSeqOk(tokens)) continue;
+    if (row.us.every(u => paragraphAbove(u))) continue;   // 본문 열거 문단
+    for (const u of row.us) {
+      exempt.add(u);
+      /* 줄바꿈 이어짐: 같은 폰트·같은 좌단·한 줄 피치로 바로 아래 최대 2줄까지 함께 면제
+       * (ICLR B.1의 서브캡션 둘째 줄) */
+      let prev = u;
+      for (let k = 0; k < 2; k++) {
+        const next = lines.find(v => !exempt.has(v) && v.font === prev.font &&
+          Math.abs(v.left - prev.left) <= 4 &&
+          (v.top + v.h) - (prev.top + prev.h) >= 0.85 * prev.h &&
+          (v.top + v.h) - (prev.top + prev.h) <= 1.95 * prev.h);
+        if (!next || SUBPANEL_HEAD_RE.test(next.s)) break;
+        exempt.add(next);
+        prev = next;
+      }
+    }
+  }
+  return exempt;
 }
 
 /* ===================== 이미지 XObject bbox (CTM 추적) ===================== */
@@ -351,7 +609,11 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     return (u.w >= 190 && (nb.above || nb.below)) ||
            (u.w >= 100 && nb.above && nb.below);   // 좁은 wrapfigure 본문 컬럼
   }));
+  /* 서브패널 라벨 면제 대상 (v2.9.0) — 픽셀 블록 스캔의 첫 블록 BODY stop에서만 소비 */
+  const subPanel = subpanelStoppers(lines, stoppers, dom);
   dbg(`[p${pg.num}] lines=${lines.length} imgs=${pg.images.length} caps=${caps.map(c=>JSON.stringify(c.s.slice(0,30))).join(" ")}`);
+  if (subPanel.size)
+    dbg(`  subpanel=${subPanel.size} ${[...subPanel].slice(0, 4).map(u => JSON.stringify(u.s.slice(0, 22))).join(" ")}`);
   for (const cap of caps) {
     const capInfo = infoByAnchor.get(cap);
     const num = capInfo.num;
@@ -361,6 +623,11 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         ` label=[${lb.left.toFixed(0)},${(lb.left + lb.w).toFixed(0)}]` +
         ` text=${JSON.stringify(cap.s.slice(0, 50))}`);
     }
+    if (capInfo.soft)
+      dbg(`  Fig${num}: SOFT anchor form=${capInfo.form} text=${JSON.stringify(cap.s.slice(0, 50))}`);
+    if (capInfo.embedded)
+      dbg(`  Fig${num}: EMBEDDED sib=[${capInfo.sibL == null ? "-" : capInfo.sibL.toFixed(0)},` +
+        `${capInfo.sibR == null ? "-" : capInfo.sibR.toFixed(0)}] text=${JSON.stringify(cap.s.slice(0, 50))}`);
     /* 1) 캡션 블록 확장 (여러 줄 캡션 흡수) + 캡션 전체 텍스트 수집 */
     let capBottom = cap.top + cap.h, colL = cap.left, colR = cap.left + cap.w;
     let capText = cap.s;
@@ -397,6 +664,11 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       if (oc.left > x1) exR = Math.min(exR, oc.left - 8);
       else if (oc.left + oc.w < x0) exL = Math.max(exL, oc.left + oc.w + 8);
     }
+    /* 임베디드 형제 클램프 (v2.9.2) — 같은 라인에서 분해된 나란한 캡션끼리는 서로의 라벨 x를
+     * 확장 한계로 삼는다. 형제는 캡션과 같은 baseline이라 위 밴드 루프가 잡지 못한다.
+     * sibL/sibR은 임베디드 앵커에만 있으므로 나머지 코퍼스에 대한 영향은 없다. */
+    if (capInfo.sibL != null) exL = Math.max(exL, capInfo.sibL);
+    if (capInfo.sibR != null) exR = Math.min(exR, capInfo.sibR);
     if (!inband.some(u => (u.left + u.w < x0 || u.left > x1) && stoppers.has(u))) {
       for (const u of inband)
         if (u.left >= exL && u.left + u.w <= exR) {
@@ -490,12 +762,19 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         if (b1 < 56 * S && (b1 - b0) < 28 * S && bl.length) {
           dbg(`    blk [${b0}-${b1}] HEADER stop`); stopReason = "header"; farBoundary = b1; break;
         }
-        const nstop = bl.filter(u => stoppers.has(u)).length;
+        const stopLines = bl.filter(u => stoppers.has(u));
+        const nstop = stopLines.length;
         const guard = incl.length ? 1 : 2;
-        if (nstop >= guard && !hasBorder(b0, b1) && !hasImage(b0, b1)) {
+        /* 서브패널 면제 (v2.9.0): 캡션 바로 위 "첫" 블록의 stopper가 전부 서브패널 라벨이면
+         * 본문이 아니라 figure 내부다. 첫 블록 한정(incl 비었을 때만) — 이 면제는 빈 결과만
+         * 뒤집을 수 있고 이미 포함된 영역을 위로 넓히지 못한다 (인접 figure 침범 차단). */
+        const subpanelPass = nstop >= guard && incl.length === 0 &&
+          (cap.top - b1 / S) <= 24 && stopLines.every(u => subPanel.has(u));
+        if (nstop >= guard && !subpanelPass && !hasBorder(b0, b1) && !hasImage(b0, b1)) {
           dbg(`    blk [${b0}-${b1}] BODY stop (nstop=${nstop})`);
           stopReason = "body"; stopNstop = nstop; farBoundary = b1; break;
         }
+        if (subpanelPass) dbg(`    blk [${b0}-${b1}] SUBPANEL pass (nstop=${nstop})`);
         dbg(`    blk [${b0}-${b1}] lines=${bl.length} nstop=${nstop} -> incl`);
         incl.push([b0, b1]);
         if (rcap - b0 > 660 * S) { stopReason = "max-span"; farBoundary = b0; break; }
@@ -1610,10 +1889,14 @@ async function extract(data, opts = {}) {
     const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
     const lines = buildLines(tc, vp.height);
-    const captionData = captionAnchors(lines);
+    const captionData = captionAnchors(lines, dbg);
     for (const l of lines) fontW[l.font] = (fontW[l.font] || 0) + l.w;
     pageData.push({ page, num: p, w: vp.width, h: vp.height, lines, captionData });
   }
+  /* 1.5차: 문서 수준 게이트로 soft 캡션 앵커 승격 (v2.9.1). 여기서만 판단할 수 있다 —
+   * captionAnchors는 페이지별이고 문서의 hard 앵커 총수는 1차 패스가 끝나야 확정된다.
+   * 승격분은 아래 2차 패스의 prefilter(anchors.length)를 자동으로 통과한다. */
+  promoteSoftAnchors(pageData, dbg);
   const dom = Object.entries(fontW).sort((a, b) => b[1] - a[1])[0]?.[0];
   /* 2차: 캡션 있는 페이지만 렌더 + 감지 */
   const allFigs = [];

@@ -72,8 +72,7 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 - **confidence**: 현재 1.0 고정 (플레이스홀더). 추후 감지 경로별 실측 값으로 교체 예정.
 - **Table 미지원**: 엔진은 figure만 감지한다. Table region은 v1에서 수동 크롭으로 처리.
 - **텍스트 레이어 없는 PDF(스캔본)**: 캡션을 찾지 못해 figures가 빈 배열 — 정상 동작.
-- **라벨·캡션 없는 figure / label-above 레이아웃**: "Figure N" 표기가 아예 없는 문서는 구조적 미탐지,
-  라벨이 그림 위에 오는 문서(NBER류)는 인접 figure 오탐 가능 — 엔진 repo 백로그 (ALGORITHM.md §알려진 한계).
+- **캡션 앵커·다방향 한계**: "Figure N" 표기가 아예 없는 문서는 구조적 미탐지다. v2.8.0은 캡션 위·아래·좌·우 figure 후보를 지원하지만, side caption의 세로 정렬 증거가 약하거나 기존 상향 후보가 강하면 보수적으로 미탐지/기존 영역을 유지할 수 있다. 캡션과 figure가 서로 다른 페이지인 레이아웃도 미지원이다 (엔진 repo ALGORITHM.md §알려진 한계).
 - 엔진은 백그라운드 탭에서 크롬 타이머 스로틀링의 영향을 받는다(분석이 수십 배 느려짐).
   전체 문서 스캔은 사용자가 뷰어를 보고 있는 동안 idle로 돌리는 것을 권장.
 

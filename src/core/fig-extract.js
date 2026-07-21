@@ -31,7 +31,16 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.5.1";
+const VERSION = "2.8.0";
+// 2.8.0: [계약 무변경] hard caption anchor를 page prefilter와 탐지에서 공유하고,
+//        up/down/left/right 후보를 공통 채점·선택기에 통합. side column-profile scan과
+//        본문·캡션·margin stopper, frame/raster 보호, sliver/tail tightening을 추가.
+//        공개 export·결과 필드·좌표계·(num,page) 식별자·manifest 스키마 불변.
+// 2.7.0: [계약 무변경] label-above(캡션 바로 아래 figure) 하향 재시도 감지.
+//        현행 상향 결과를 먼저 보존하고, 이상 신호가 있을 때만 캡션 아래 후보를 대칭 스캔·공통 채점해
+//        유의하게 나은 경우에만 교체하는 재시도 scaffold 도입. 출력 필드·(num,page) 키·좌표계 불변.
+// 2.6.0: Extended Data("ED.N")·Supplementary/선행 S("S.N") 캡션 감지 추가 [계약 무변경].
+//        전용 정규식과 isCaption num 매핑을 확장. 기존 "Figure N" 출력·구분자 방어 불변.
 // 2.5.1: 메모리 패치 (PDFViewer#12) — ① 페이지 스캔 상한 기본값(60) 제거: 미지정 시 전체 페이지 스캔,
 //        opts.maxPages는 선택적 상한으로 유지. ② figure.canvas(페이지 전체 렌더 보관) 폐지 → 스캔 중
 //        즉시 크롭한 figure.cropCanvas로 대체: 페이지 캔버스 동시 상주 최대 1장, dedup·크기 필터를
@@ -50,7 +59,13 @@ const VERSION = "2.5.1";
 // 2.1.1: pdf.js 3.11.174 → 4.10.38 (Margin과 버전 일치). 알고리즘 무변경
 
 /* ===================== 상수 (pt 단위 기준) ===================== */
-// 캡션 정규식: "Figure 1:" "Fig. 2." "Fig. 3 |" "FIGURE 4" "Figure A.1:" "Figure IV." 등
+// 확장 캡션 정규식: "Extended Data Fig. 1" / "Supplementary Figure 1" / "Suppl. Fig 1"
+const SPECIAL_CAP_RE  = /^(extended data|supplementary|suppl\.)\s+(?:figure|fig)\s*\.?\s*(\d+)\s*([.:|]|$)/i;
+const SPECIAL_CAP_RE2 = /^(extendeddata|supplementary|suppl\.)(?:figure|fig)\.?(\d+)([.:|]|$)/i;
+// PLOS 선행형: "S1 Fig. ..." / "S12 Figure: ..."
+const LEADING_S_CAP_RE  = /^S(\d+)\s+(?:figure|fig)\s*\.?\s*([.:|]|$)/i;
+const LEADING_S_CAP_RE2 = /^S(\d+)(?:figure|fig)\.?([.:|]|$)/i;
+// 기본 캡션 정규식: "Figure 1:" "Fig. 2." "Fig. 3 |" "FIGURE 4" "Figure A.1:" "Figure IV." 등
 const CAP_RE  = /^(figure|fig)\s*\.?\s*(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)\s*([.:|]|$)/i;
 // 공백 제거 버전: PDF.js가 small-caps를 "F IGURE 2"처럼 조각내는 경우 대응
 const CAP_RE2 = /^(figure|fig)\.?(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)([.:|]|$)/i;
@@ -111,19 +126,115 @@ function buildLines(tc, pageH) {
 }
 
 /* ===================== 캡션 판별 ===================== */
-function isCaption(line) {
-  let m = CAP_RE.exec(line.s);
-  if (!m) {
-    const stripped = line.s.replace(/\s+/g, "");
-    m = CAP_RE2.exec(stripped);
-    if (!m) return null;
-    const sep = m[3] || "";
-    if (![".", ":", "|"].includes(sep) && stripped.length > 12) return null;
-    return m[2].toUpperCase();
+function matchCaption(s, compact) {
+  let m = (compact ? SPECIAL_CAP_RE2 : SPECIAL_CAP_RE).exec(s);
+  if (m) {
+    const prefix = m[1].toLowerCase().startsWith("extended") ? "ED" : "S";
+    return { num: `${prefix}.${m[2]}`, sep: m[3] || "" };
   }
-  const sep = m[3] || "";
-  if (![".", ":", "|"].includes(sep) && line.s.length > 14) return null;
-  return m[2].toUpperCase();
+  m = (compact ? LEADING_S_CAP_RE2 : LEADING_S_CAP_RE).exec(s);
+  if (m) return { num: `S.${m[1]}`, sep: m[2] || "" };
+  m = (compact ? CAP_RE2 : CAP_RE).exec(s);
+  if (m) return { num: m[2].toUpperCase(), sep: m[3] || "" };
+  return null;
+}
+
+function isCaption(line) {
+  let match = matchCaption(line.s, false);
+  if (!match) {
+    const stripped = line.s.replace(/\s+/g, "");
+    match = matchCaption(stripped, true);
+    if (!match) return null;
+    if (![".", ":", "|"].includes(match.sep) && stripped.length > 12) return null;
+    return match.num;
+  }
+  if (![".", ":", "|"].includes(match.sep) && line.s.length > 14) return null;
+  return match.num;
+}
+
+const HARD_STITCH_NUM_RE = /^(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)\s*([.:|])(?!\d)(?:\s*.*)?$/i;
+const STITCH_GAP_PT = 18;
+
+/* buildLines의 8pt 컬럼 보호로 Figure/Fig.와 번호가 갈라진 경우만 hard anchor로 복원한다. */
+function captionAnchors(lines) {
+  const slots = new Array(lines.length);
+  const ownerByPart = new Map();
+  const infoByAnchor = new Map();
+  const bottom = u => u.top + u.h;
+  const boxOf = parts => {
+    const left = Math.min(...parts.map(u => u.left));
+    const right = Math.max(...parts.map(u => u.left + u.w));
+    const top = Math.min(...parts.map(u => u.top));
+    const bot = Math.max(...parts.map(bottom));
+    return { left, w: right - left, top, h: bot - top };
+  };
+  const sameBaseline = (a, b) =>
+    Math.abs(bottom(b) - bottom(a)) < Math.max(2, b.h * 0.45);
+  const hardPrefix = u => /^(?:figure|fig)\.?$/i.test(u.s.replace(/\s+/g, ""));
+
+  /* 기존 isCaption 결과는 clone하지 않고 동일 raw line 객체·순서로 보존한다. */
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i], num = isCaption(line);
+    if (!num) continue;
+    let match = matchCaption(line.s, false);
+    if (!match) match = matchCaption(line.s.replace(/\s+/g, ""), true);
+    slots[i] = line;
+    ownerByPart.set(line, line);
+    infoByAnchor.set(line, {
+      num,
+      hard: !!match && [".", ":", "|"].includes(match.sep),
+      stitched: false,
+      parts: [line],
+      labelBox: boxOf([line])
+    });
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const prefix = lines[i];
+    if (ownerByPart.has(prefix) || !hardPrefix(prefix)) continue;
+    const row = lines.filter(u => u !== prefix && sameBaseline(prefix, u))
+      .sort((a, b) => a.left - b.left);
+    const prefixRight = prefix.left + prefix.w;
+    let numeric = null, numericMatch = null;
+    for (const u of row) {
+      if (ownerByPart.has(u)) continue;
+      const gap = u.left - prefixRight;
+      if (gap <= 8) continue;
+      if (gap > STITCH_GAP_PT) break;
+      const match = HARD_STITCH_NUM_RE.exec(u.s.trim());
+      if (match) { numeric = u; numericMatch = match; break; }
+    }
+    if (!numeric) continue;
+
+    const parts = [prefix, numeric];
+    let prev = numeric;
+    const numericIndex = row.indexOf(numeric);
+    for (const u of row.slice(numericIndex + 1)) {
+      const gap = u.left - (prev.left + prev.w);
+      if (gap < -2 || gap > STITCH_GAP_PT) break;
+      if (ownerByPart.has(u) || hardPrefix(u)) break;
+      parts.push(u);
+      prev = u;
+    }
+    const anchorBox = boxOf(parts);
+    const main = parts.reduce((a, b) => a.w >= b.w ? a : b);
+    const anchor = {
+      ...anchorBox,
+      s: parts.map(u => u.s).join(" ").trim(),
+      font: main.font
+    };
+    slots[i] = anchor;
+    ownerByPart.set(anchor, anchor);
+    for (const part of parts) ownerByPart.set(part, anchor);
+    infoByAnchor.set(anchor, {
+      num: numericMatch[1].toUpperCase(),
+      hard: true,
+      stitched: true,
+      parts,
+      labelBox: boxOf([prefix, numeric])
+    });
+  }
+  return { anchors: slots.filter(Boolean), ownerByPart, infoByAnchor };
 }
 
 /* 위/아래 인접 줄(문단 이웃) 존재 여부 — 본문 문단 판별에 사용 */
@@ -181,9 +292,58 @@ function makeInk(canvas) {
 }
 const inkAt = (g, x, y) => (x >= 0 && y >= 0 && x < g.W && y < g.H) ? g.ink[y * g.W + x] : 0;
 
+/* 방향별 후보가 공유하는 순수 채점기. 후보 생성기(up/down, Phase 2: left/right)는
+   평범한 수치 지표만 이 함수에 넘기고, 선택기는 동일 점수축으로 비교한다. */
+const clamp01 = v => Math.max(0, Math.min(1, v));
+function figureScore(m) {
+  const area = 3.0 * clamp01(m.areaRatio / 0.08);
+  const width = 2.0 * clamp01(m.widthRatio / 0.35);
+  const height = 2.0 * clamp01(m.heightRatio / 0.22);
+  const density = 2.0 * clamp01(m.inkDensity / 0.035);
+  const proximity = 2.0 * clamp01(1 - m.gapPt / 18);
+  const boundary = m.farClosed ? 1.2 : 0;
+  const raster = m.raster ? 0.8 : 0;
+  const bodyPenalty = Math.min(6, m.bodyStops * 1.5);
+  const tinyPenalty = (m.areaRatio < 0.002 || m.heightRatio < 0.012) ? 8 : 0;
+  const slenderPenalty = (m.widthRatio < 0.10 && m.heightRatio > 0.12) ? 5 : 0;
+  const hugePenalty = (m.areaRatio > 0.65 || m.heightRatio > 0.82) ? 8 : 0;
+  const otherCapPenalty = m.stopReason === "other-cap" ? 0.5 : 0;
+  const total = area + width + height + density + proximity + boundary + raster
+    - bodyPenalty - tinyPenalty - slenderPenalty - hugePenalty - otherCapPenalty;
+  return { total, area, width, height, density, proximity, boundary, raster,
+    bodyPenalty, tinyPenalty, slenderPenalty, hugePenalty, otherCapPenalty };
+}
+function chooseCandidate(up, alternatives, policy) {
+  /* 채점 이상은 대체 방향 채택의 근거가 될 수 없다. status quo(up)를 우선한다. */
+  if (up && (!up.score || !Number.isFinite(up.score.total)))
+    return { candidate: up, direction: "up", margin: policy.margin };
+  /* Keep the strongest seed per direction, then apply hysteresis in the locked
+     up -> down -> left -> right order. A later direction cannot steal a nearly
+     tied result from an earlier, better-established direction. */
+  const eligible = alternatives.filter(candidate => candidate && candidate.valid &&
+    Number.isFinite(candidate.score.total) && candidate.score.total >= policy.minScore);
+  let incumbent = up, direction = up ? "up" : "none", usedMargin = policy.margin;
+  for (const dir of ["down", "left", "right"]) {
+    const best = eligible.filter(candidate => candidate.direction === dir)
+      .reduce((winner, candidate) =>
+        !winner || candidate.score.total > winner.score.total ? candidate : winner, null);
+    if (!best) continue;
+    const margin = typeof policy.marginFor === "function"
+      ? policy.marginFor(best) : policy.margin;
+    if (incumbent && best.score.total <= incumbent.score.total + margin) continue;
+    incumbent = best;
+    direction = dir;
+    usedMargin = margin;
+  }
+  return { candidate: incumbent, direction, margin: usedMargin };
+}
+
 /* ===================== 페이지 단위 감지 (핵심) ===================== */
-function detectPage(pg, lines, dom, grid, dbg) {
+function detectPage(pg, lines, dom, grid, dbg, captionData) {
   const figs = [];
+  const { anchors: caps, ownerByPart, infoByAnchor } = captionData;
+  const otherCaps = (blockLines, cap) => [...new Set(blockLines
+    .map(u => ownerByPart.get(u)).filter(owner => owner && owner !== cap))];
   // stopper: 도달하면 figure 영역 상한으로 간주하는 "본문 줄"
   const stoppers = new Set(lines.filter(u => {
     if (u.font !== dom) return false;
@@ -191,15 +351,22 @@ function detectPage(pg, lines, dom, grid, dbg) {
     return (u.w >= 190 && (nb.above || nb.below)) ||
            (u.w >= 100 && nb.above && nb.below);   // 좁은 wrapfigure 본문 컬럼
   }));
-  const caps = lines.filter(u => isCaption(u));
   dbg(`[p${pg.num}] lines=${lines.length} imgs=${pg.images.length} caps=${caps.map(c=>JSON.stringify(c.s.slice(0,30))).join(" ")}`);
   for (const cap of caps) {
-    const num = isCaption(cap);
+    const capInfo = infoByAnchor.get(cap);
+    const num = capInfo.num;
+    if (capInfo.stitched) {
+      const lb = capInfo.labelBox;
+      dbg(`  Fig${num}: STITCH parts=${capInfo.parts.length}` +
+        ` label=[${lb.left.toFixed(0)},${(lb.left + lb.w).toFixed(0)}]` +
+        ` text=${JSON.stringify(cap.s.slice(0, 50))}`);
+    }
     /* 1) 캡션 블록 확장 (여러 줄 캡션 흡수) + 캡션 전체 텍스트 수집 */
     let capBottom = cap.top + cap.h, colL = cap.left, colR = cap.left + cap.w;
     let capText = cap.s;
+    const ownCaptionLines = new Set(capInfo.parts);
     for (const u of [...lines].sort((a, b) => a.top - b.top)) {
-      if (u === cap || isCaption(u)) continue;
+      if (ownerByPart.has(u)) continue;
       const gap = u.top - capBottom;
       const win = Math.max(u.h, cap.h) * (u.font === dom ? 0.45 : 1.7);
       if (!(gap >= -3 && gap < win)) continue;
@@ -208,6 +375,7 @@ function detectPage(pg, lines, dom, grid, dbg) {
       capBottom = Math.max(capBottom, u.top + u.h);
       colL = Math.min(colL, u.left); colR = Math.max(colR, u.left + u.w);
       capText += " " + u.s;
+      ownCaptionLines.add(u);
     }
     const capbox = { left: colL, w: colR - colL, top: cap.top };
     const captionBox = { x0: colL, y0: cap.top, x1: colR, y1: capBottom }; // pt, 좌상단 원점
@@ -217,17 +385,17 @@ function detectPage(pg, lines, dom, grid, dbg) {
     for (const u of lines) {
       const ub = u.top + u.h;
       if (ub >= cap.top || ox(u, capbox) < 10) continue;
-      if ((stoppers.has(u) || isCaption(u)) && ub > yPre) yPre = ub;
+      const owner = ownerByPart.get(u);
+      if ((stoppers.has(u) || (owner && owner !== cap)) && ub > yPre) yPre = ub;
     }
     let x0 = capbox.left, x1 = capbox.left + capbox.w;
     const inband = lines.filter(u => u.top >= yPre - 2 && u.top + u.h <= cap.top + 2);
     /* 밴드 내 다른 캡션 → 확장 한계 */
     let exL = 0, exR = pg.w;
-    for (const oc of inband) {
-      if (isCaption(oc) && oc !== cap) {
-        if (oc.left > x1) exR = Math.min(exR, oc.left - 8);
-        else if (oc.left + oc.w < x0) exL = Math.max(exL, oc.left + oc.w + 8);
-      }
+    for (const oc of caps) {
+      if (oc === cap || oc.top < yPre - 2 || oc.top + oc.h > cap.top + 2) continue;
+      if (oc.left > x1) exR = Math.min(exR, oc.left - 8);
+      else if (oc.left + oc.w < x0) exL = Math.max(exL, oc.left + oc.w + 8);
     }
     if (!inband.some(u => (u.left + u.w < x0 || u.left > x1) && stoppers.has(u))) {
       for (const u of inband)
@@ -304,29 +472,40 @@ function detectPage(pg, lines, dom, grid, dbg) {
         return false;
       };
       const incl = [];
+      let stopReason = "page-edge", stopNstop = 0;
+      let farBoundary = 0;
       for (const [b0, b1] of blocks) {
         const bl = blockLines(b0, b1);
-        const others = bl.filter(u => isCaption(u) && u !== cap);
+        const others = otherCaps(bl, cap);
         if (others.length) {
           if (!incl.length) {
             const cb = Math.max(...others.map(u => (u.top + u.h) * S)) + 3;
             if (b1 - cb > 15) incl.push([cb, b1]);
           }
           dbg(`    blk [${b0}-${b1}] OTHER-CAP stop`);
+          stopReason = "other-cap";
+          farBoundary = b1;
           break;
         }
-        if (b1 < 56 * S && (b1 - b0) < 28 * S && bl.length) { dbg(`    blk [${b0}-${b1}] HEADER stop`); break; }
+        if (b1 < 56 * S && (b1 - b0) < 28 * S && bl.length) {
+          dbg(`    blk [${b0}-${b1}] HEADER stop`); stopReason = "header"; farBoundary = b1; break;
+        }
         const nstop = bl.filter(u => stoppers.has(u)).length;
         const guard = incl.length ? 1 : 2;
-        if (nstop >= guard && !hasBorder(b0, b1) && !hasImage(b0, b1)) { dbg(`    blk [${b0}-${b1}] BODY stop (nstop=${nstop})`); break; }
+        if (nstop >= guard && !hasBorder(b0, b1) && !hasImage(b0, b1)) {
+          dbg(`    blk [${b0}-${b1}] BODY stop (nstop=${nstop})`);
+          stopReason = "body"; stopNstop = nstop; farBoundary = b1; break;
+        }
         dbg(`    blk [${b0}-${b1}] lines=${bl.length} nstop=${nstop} -> incl`);
         incl.push([b0, b1]);
-        if (rcap - b0 > 660 * S) break;
+        if (rcap - b0 > 660 * S) { stopReason = "max-span"; farBoundary = b0; break; }
       }
       /* 상단 슬리버(가는 선/헤더 잔재) 제거 */
       while (incl.length > 1) {
         const top = incl[incl.length - 1], nxt = incl[incl.length - 2];
-        if ((top[1] - top[0]) < 12 * S && (nxt[0] - top[1]) > 40 * S) incl.pop();
+        if ((top[1] - top[0]) < 12 * S && (nxt[0] - top[1]) > 40 * S) {
+          farBoundary = Math.max(farBoundary, top[1]); incl.pop();
+        }
         else break;
       }
       /* 상단 섹션 헤딩("2.1 Framework Overview" 등) 제거 */
@@ -336,16 +515,859 @@ function detectPage(pg, lines, dom, grid, dbg) {
         const bl = blockLines(tb0, tb1);
         if (!bl.length) break;
         const joined = bl.map(u => u.s).join(" ");
-        if (joined.length <= 45 && /^(\d+(\.\d+)*|[A-Z](\.\d+)+)\s/.test(joined)) incl.pop();
+        if (joined.length <= 45 && /^(\d+(\.\d+)*|[A-Z](\.\d+)+)\s/.test(joined)) {
+          farBoundary = Math.max(farBoundary, tb1); incl.pop();
+        }
         else break;
       }
-      return { incl, rx0, rx1 };
+      const farBlankPx = incl.length
+        ? Math.max(0, incl[incl.length - 1][0] - farBoundary - 1) : 0;
+      return { incl, rx0, rx1, stopReason, stopNstop, farBlankPx, unprotectedBodyStops: 0 };
     };
-    let { incl, rx0, rx1 } = scan(x0, x1);
+    let { incl, rx0, rx1, stopReason: upStopReason, farBlankPx: upFarBlankPx,
+      unprotectedBodyStops: upBodyStops, stopNstop: upStopNstop } = scan(x0, x1);
     if (!incl.length && (Math.abs(x0 - capbox.left) > 2 || Math.abs(x1 - (capbox.left + capbox.w)) > 2)) {
       dbg(`  Fig${num}: RETRY with capbox width`);
-      ({ incl, rx0, rx1 } = scan(capbox.left, capbox.left + capbox.w));
+      ({ incl, rx0, rx1, stopReason: upStopReason, farBlankPx: upFarBlankPx,
+        unprotectedBodyStops: upBodyStops, stopNstop: upStopNstop } =
+        scan(capbox.left, capbox.left + capbox.w));
     }
+
+    const measureCandidate = (dir, fx0, fx1, ry0, ry1, raster, stopReason,
+      bodyStops, farBlankPx, gapOverride) => {
+      const w = Math.max(1, fx1 - fx0), h = Math.max(1, ry1 - ry0);
+      let ink = 0, samples = 0;
+      const step = 3;
+      const sy0 = Math.max(0, Math.ceil(ry0)), sy1 = Math.min(grid.H - 1, Math.floor(ry1));
+      const sx0 = Math.max(0, Math.ceil(fx0)), sx1 = Math.min(grid.W - 1, Math.floor(fx1));
+      for (let yy = sy0; yy <= sy1; yy += step) {
+        for (let xx = sx0; xx <= sx1; xx += step) {
+          ink += inkAt(grid, xx, yy); samples++;
+        }
+      }
+      let geometricGapPt;
+      if (dir === "up") geometricGapPt = Math.max(0, cap.top * S - ry1) / S;
+      else if (dir === "down") geometricGapPt = Math.max(0, ry0 - capBottom * S) / S;
+      else if (dir === "left") geometricGapPt = Math.max(0, cap.left * S - fx1) / S;
+      else if (dir === "right")
+        geometricGapPt = Math.max(0, fx0 - (cap.left + cap.w) * S) / S;
+      else geometricGapPt = Infinity;
+      const gapPt = Number.isFinite(gapOverride) ? gapOverride : geometricGapPt;
+      return {
+        widthPt: w / S,
+        heightPt: h / S,
+        widthRatio: w / grid.W,
+        heightRatio: h / grid.H,
+        areaRatio: (w * h) / (grid.W * grid.H),
+        inkDensity: samples ? ink / samples : 0,
+        gapPt,
+        bodyStops,
+        farBlankPx,
+        farClosed: farBlankPx >= Math.round(4.8 * S),
+        raster,
+        stopReason
+      };
+    };
+    const scoreText = (dir, candidate) => {
+      if (!candidate) return `  Fig${num}: SCORE ${dir} none`;
+      const m = candidate.metrics, s = candidate.score;
+      return `  Fig${num}: SCORE ${dir} total=${s.total.toFixed(2)} valid=${candidate.valid ? 1 : 0}` +
+        ` area=${m.areaRatio.toFixed(3)} wh=${m.widthRatio.toFixed(3)}/${m.heightRatio.toFixed(3)}` +
+        ` density=${m.inkDensity.toFixed(3)} gap=${m.gapPt.toFixed(1)}pt` +
+        ` body=${m.bodyStops} blank=${m.farBlankPx}px closed=${m.farClosed ? 1 : 0}` +
+        ` raster=${m.raster ? 1 : 0}` +
+        ` stop=${m.stopReason} reject=${candidate.rejectReason || "-"}` +
+        ` terms=${s.area.toFixed(2)}/${s.width.toFixed(2)}/${s.height.toFixed(2)}/` +
+        `${s.density.toFixed(2)}/${s.proximity.toFixed(2)}/${s.boundary.toFixed(2)}/${s.raster.toFixed(2)}` +
+        ` penalties=${s.bodyPenalty.toFixed(2)}/${s.tinyPenalty.toFixed(2)}/` +
+        `${s.slenderPenalty.toFixed(2)}/${s.hugePenalty.toFixed(2)}/${s.otherCapPenalty.toFixed(2)}`;
+    };
+
+    const downStart = Math.max(0, Math.round(capBottom * S) + 2);
+    const capNorm = capText.replace(/\s+/g, " ").trim();
+    const capLineNorm = cap.s.replace(/\s+/g, " ").trim();
+    const bareLabel = capNorm === capLineNorm && capNorm.length <= 16 &&
+      capBottom - cap.top <= Math.max(cap.h * 1.4, cap.h + 2);
+
+    const downSeedBounds = () => {
+      /* 위쪽 yPre에서 만든 x0/x1·exL/exR은 하향 후보에 재사용하지 않는다.
+         캡션 아래의 실제 이미지/근접 잉크를 성분별 seed로 두어, 같은 높이의 figure와
+         본문 열을 한 범위로 합치지 않고 BODY 판정이 각자 작동하게 한다. */
+      const seeds = [];
+      const capR = capbox.left + capbox.w;
+      const nearbyImages = [];
+      for (const im of pg.images) {
+        const vgap = im.top - capBottom;
+        const hgap = im.left > capR ? im.left - capR
+          : capbox.left > im.left + im.w ? capbox.left - (im.left + im.w) : 0;
+        if (vgap >= -4 && vgap < 48 && hgap <= 96)
+          nearbyImages.push({ bx0: im.left, bx1: im.left + im.w, source: "image", hgap });
+      }
+      nearbyImages.sort((a, b) => a.hgap - b.hgap ||
+        (b.bx1 - b.bx0) - (a.bx1 - a.bx0) || a.bx0 - b.bx0);
+      for (const imageSeed of nearbyImages.slice(0, 1))
+        seeds.push({ bx0: imageSeed.bx0, bx1: imageSeed.bx1, source: imageSeed.source });
+      const eL = 0, eR = grid.W;
+      const bandEnd = Math.min(grid.H, downStart + Math.round(48 * S));
+      const capLpx = Math.round(capbox.left * S), capRpx = Math.round(capR * S);
+      const occupied = [];
+      for (let xx = eL; xx < eR; xx++) {
+        let any = false;
+        for (let yy = downStart; yy < bandEnd; yy += 2) {
+          if (inkAt(grid, xx, yy)) { any = true; break; }
+        }
+        if (!any) continue;
+        occupied.push(xx);
+      }
+      const runs = [], JOIN = Math.round(8 * S);
+      for (const xx of occupied) {
+        const last = runs[runs.length - 1];
+        if (!last || xx - last.x1 > JOIN) runs.push({ x0: xx, x1: xx });
+        else last.x1 = xx;
+      }
+      const nearbyRuns = [];
+      for (const run of runs) {
+        const gap = run.x1 < capLpx ? capLpx - run.x1 : run.x0 > capRpx ? run.x0 - capRpx : 0;
+        const width = run.x1 - run.x0 + 1;
+        if (gap <= 140 * S && width >= 4 * S) nearbyRuns.push({ ...run, gap, width });
+      }
+      nearbyRuns.sort((a, b) => b.width - a.width || a.gap - b.gap || a.x0 - b.x0);
+      for (const run of nearbyRuns.slice(0, 2))
+        seeds.push({ bx0: run.x0 / S, bx1: (run.x1 + 1) / S, source: "ink" });
+      /* component 증거가 같은 점수면 image/넓은 ink를 먼저 유지하고 cap-only는 마지막 폴백이다. */
+      seeds.push({ bx0: capbox.left, bx1: capR, source: "cap" });
+      const unique = [];
+      for (const seed of seeds) {
+        const clipped = {
+          bx0: Math.max(0, seed.bx0), bx1: Math.min(pg.w, seed.bx1), source: seed.source
+        };
+        if (clipped.bx1 <= clipped.bx0) continue;
+        const key = `${Math.round(clipped.bx0 * S)}:${Math.round(clipped.bx1 * S)}`;
+        if (!unique.some(u => u.key === key)) unique.push({ ...clipped, key });
+      }
+      return unique.map(({ key, ...seed }) => seed);
+    };
+    const hasImageIn = (b0, b1, bx0, bx1) => pg.images.some(im => {
+      const it = im.top * S, ib = (im.top + im.h) * S;
+      const vertical = Math.min(ib, b1) - Math.max(it, b0);
+      return vertical > 0.5 * (ib - it) &&
+        ox(im, { left: bx0, w: bx1 - bx0 }) > 0.2 * Math.min(im.w, bx1 - bx0);
+    });
+    const downSeeds = downSeedBounds();
+    const firstMeaningfulDownGap = seed => {
+      if (!seed || downStart >= grid.H || seed.bx1 <= seed.bx0) return Infinity;
+      const rx0 = Math.max(0, Math.round(seed.bx0 * S));
+      const rx1 = Math.min(grid.W, Math.round(seed.bx1 * S));
+      const Wb = Math.max(1, rx1 - rx0);
+      const limit = Math.min(grid.H, downStart + Math.round(30 * S));
+      const prof = new Int32Array(Math.max(0, limit - downStart));
+      for (let y = downStart; y < limit; y++) {
+        let c = 0;
+        for (let x = rx0; x < rx1; x++) c += inkAt(grid, x, y);
+        prof[y - downStart] = c;
+      }
+      const thr = Math.max(2, Math.floor(0.002 * Wb));
+      const blank = y => prof[y - downStart] <= thr;
+      const SEP = Math.round(4.8 * S), MIN_H = Math.round(4 * S);
+      let y = downStart;
+      while (y < limit) {
+        while (y < limit && blank(y)) y++;
+        if (y >= limit) break;
+        const b0 = y; let b1 = y, gap = 0;
+        while (y < limit) {
+          if (blank(y)) { gap++; if (gap >= SEP) break; }
+          else { gap = 0; b1 = y; }
+          y++;
+        }
+        if (b1 - b0 + 1 >= MIN_H) return (b0 - downStart) / S;
+      }
+      return Infinity;
+    };
+    const downGapPt = downSeeds.reduce((best, seed) =>
+      Math.min(best, firstMeaningfulDownGap(seed)), Infinity);
+
+    const scanDown = (bx0, bx1, strictProseTail) => {
+      const drx0 = Math.max(0, Math.round(bx0 * S));
+      const drx1 = Math.min(grid.W, Math.round(bx1 * S));
+      const Wb = Math.max(1, drx1 - drx0);
+      const prof = new Int32Array(Math.max(0, grid.H - downStart));
+      for (let y = downStart; y < grid.H; y++) {
+        let c = 0;
+        for (let x = drx0; x < drx1; x++) c += inkAt(grid, x, y);
+        prof[y - downStart] = c;
+      }
+      const thr = Math.max(2, Math.floor(0.002 * Wb));
+      const blank = y => prof[y - downStart] <= thr;
+      const SEP = Math.round(4.8 * S);
+      const blocks = [];
+      let y = downStart;
+      while (y < grid.H) {
+        while (y < grid.H && blank(y)) y++;
+        if (y >= grid.H) break;
+        const b0 = y; let gap = 0, b1 = y;
+        while (y < grid.H) {
+          if (blank(y)) { gap++; if (gap >= SEP) break; }
+          else { gap = 0; b1 = y; }
+          y++;
+        }
+        blocks.push([b0, b1]);
+      }
+      const blockLines = (b0, b1) => lines.filter(u => {
+        const c = (u.top + u.h / 2) * S;
+        return c >= b0 - 4 && c <= b1 + 4 && ox(u, { left: bx0, w: bx1 - bx0 }) > 0.5 * u.w;
+      });
+      const borderEdgeCount = (b0, b1) => {
+        const h = b1 - b0 + 1;
+        if (h < 18) return 0;
+        const step = Math.max(1, Math.floor(h / 40));
+        const colsInk = [];
+        for (let x = drx0; x < drx1; x++) {
+          let any = 0;
+          for (let yy = b0; yy <= b1; yy += step) if (inkAt(grid, x, yy)) { any = 1; break; }
+          if (any) colsInk.push(x);
+        }
+        if (!colsInk.length) return 0;
+        let count = 0;
+        for (const edge of new Set([colsInk[0], colsInk[colsInk.length - 1]])) {
+          let continuous = false;
+          for (let dx = 0; dx < 3; dx++) {
+            const x = edge === colsInk[0] ? Math.min(grid.W - 1, edge + dx) : Math.max(0, edge - dx);
+            let run = 0, best = 0;
+            for (let yy = b0; yy <= b1; yy++) {
+              run = inkAt(grid, x, yy) ? run + 1 : 0;
+              if (run > best) best = run;
+            }
+            if (best >= 0.75 * h) { continuous = true; break; }
+          }
+          if (continuous) count++;
+        }
+        return count;
+      };
+      const hasBorder = (b0, b1) => borderEdgeCount(b0, b1) > 0;
+      const hasFrame = (b0, b1) => borderEdgeCount(b0, b1) >= 2;
+      const hasHorizontalEdge = (b0, b1, top) => {
+        const from = top ? b0 : Math.max(b0, b1 - 4);
+        const to = top ? Math.min(b1, b0 + 4) : b1;
+        const need = 0.65 * Math.max(1, drx1 - drx0);
+        for (let yy = from; yy <= to; yy++) {
+          let run = 0, best = 0;
+          for (let x = drx0; x < drx1; x++) {
+            run = inkAt(grid, x, yy) ? run + 1 : 0;
+            if (run > best) best = run;
+          }
+          if (best >= need) return true;
+        }
+        return false;
+      };
+      const hasClosedFrame = (b0, b1) => hasFrame(b0, b1) &&
+        hasHorizontalEdge(b0, b1, true) && hasHorizontalEdge(b0, b1, false);
+      const dIncl = [];
+      let stopReason = "page-edge";
+      let farBoundary = grid.H, unprotectedBodyStops = 0;
+      for (const [b0, b1] of blocks) {
+        const bl = blockLines(b0, b1);
+        const proseLines = strictProseTail ? bl.filter(u => {
+          const text = u.s.replace(/\s+/g, " ").trim();
+          if (u.w < 90 || u.h < 6 || text.length < 24) return false;
+          const nb = neighborsOf(u, lines);
+          return nb.above && nb.below;
+        }) : [];
+        if (strictProseTail && dIncl.length) {
+          const prev = dIncl[dIncl.length - 1];
+          const gapPt = (b0 - prev[1] - 1) / S;
+          const includedPt = (prev[1] - dIncl[0][0] + 1) / S;
+          const textHeavy = proseLines.length >= 4 && proseLines.length * 2 >= bl.length;
+          dbg(`    DOWN blk [${b0}-${b1}] hard-prose=${proseLines.length}/${bl.length}` +
+            ` gap=${gapPt.toFixed(1)}pt span=${includedPt.toFixed(1)}pt`);
+          if (gapPt >= 6 && includedPt >= 80 && textHeavy) {
+            dbg(`    DOWN blk [${b0}-${b1}] PROSE-TAIL stop`);
+            stopReason = "prose-tail"; farBoundary = b0; break;
+          }
+        }
+        const others = otherCaps(bl, cap);
+        if (others.length) {
+          if (!dIncl.length) {
+            const ct = Math.min(...others.map(u => u.top * S)) - 3;
+            if (ct - b0 > 15) dIncl.push([b0, ct]);
+          }
+          dbg(`    DOWN blk [${b0}-${b1}] OTHER-CAP stop`);
+          stopReason = "other-cap";
+          farBoundary = b0;
+          break;
+        }
+        if (b0 > grid.H - 56 * S && (b1 - b0) < 28 * S && bl.length) {
+          dbg(`    DOWN blk [${b0}-${b1}] FOOTER stop`);
+          stopReason = "footer"; farBoundary = b0; break;
+        }
+        const stopperLines = bl.filter(u => stoppers.has(u));
+        const nstop = stopperLines.length;
+        const imageProtectedStops = stopperLines.filter(u => pg.images.some(im => {
+          const vertical = Math.min(im.top + im.h, u.top + u.h) - Math.max(im.top, u.top);
+          return vertical > 0.5 * u.h && ox(im, u) > 0.5 * u.w;
+        })).length;
+        const unprotectedNstop = nstop - imageProtectedStops;
+        const guard = dIncl.length ? 1 : 2;
+        const frame = nstop ? hasFrame(b0, b1) : false;
+        if (unprotectedNstop >= guard && !frame) {
+          dbg(`    DOWN blk [${b0}-${b1}] BODY stop` +
+            ` (nstop=${nstop} protected=${imageProtectedStops})`);
+          stopReason = "body"; farBoundary = b0;
+          break;
+        }
+        dbg(`    DOWN blk [${b0}-${b1}] lines=${bl.length} nstop=${nstop}` +
+          ` protected=${imageProtectedStops} -> incl`);
+        dIncl.push([b0, b1]);
+        /* 이미지/테두리가 페이지 본문 전체와 우연히 겹쳐도 대량 stopper는 figure 증거가 아니다. */
+        if (nstop >= 12) unprotectedBodyStops += nstop;
+        else if (!frame) unprotectedBodyStops += unprotectedNstop;
+        if (b1 - downStart > 660 * S) {
+          stopReason = "max-span"; farBoundary = b1; break;
+        }
+      }
+      /* label 바로 아래의 얇은 구분선은 figure 폭을 페이지 전체로 부풀리지 않게 제외한다. */
+      while (dIncl.length > 1) {
+        const near = dIncl[0], next = dIncl[1];
+        if ((near[1] - near[0] + 1) < 4 * S && (next[0] - near[1] - 1) >= 4 * S) {
+          dbg(`    DOWN NEAR-SLIVER drop [${near[0]}-${near[1]}]`); dIncl.shift();
+        } else break;
+      }
+      /* 큰 래스터/완전 프레임 뒤의 짧은 텍스트 블록은 figure 밖 설명문이다.
+         한쪽 축만 긴 차트는 frame으로 보지 않아 내부 source/note를 보존한다. */
+      for (let i = 0; i + 1 < dIncl.length; i++) {
+        const cur = dIncl[i], next = dIncl[i + 1];
+        const gap = next[0] - cur[1] - 1;
+        const nextLines = blockLines(next[0], next[1]);
+        const curProtected = hasImageIn(cur[0], cur[1], bx0, bx1) || hasClosedFrame(cur[0], cur[1]);
+        const nextProtected = hasImageIn(next[0], next[1], bx0, bx1) || hasBorder(next[0], next[1]);
+        if ((cur[1] - cur[0] + 1) >= 80 * S && gap >= 8 * S && curProtected &&
+            nextLines.length && !nextProtected && (next[1] - next[0] + 1) <= 36 * S) {
+          dbg(`    DOWN TEXT-TAIL stop [${next[0]}-${next[1]}] lines=${nextLines.length}`);
+          stopReason = "text-tail"; farBoundary = Math.min(farBoundary, next[0]);
+          dIncl.splice(i + 1); break;
+        }
+      }
+      /* 캡션에서 먼 끝(하단)의 가는 슬리버·섹션 헤딩 제거 */
+      while (dIncl.length > 1) {
+        const far = dIncl[dIncl.length - 1], prev = dIncl[dIncl.length - 2];
+        if ((far[1] - far[0]) < 12 * S && (far[0] - prev[1]) > 40 * S) {
+          farBoundary = Math.min(farBoundary, far[0]); dIncl.pop();
+        }
+        else break;
+      }
+      while (dIncl.length > 1) {
+        const [fb0, fb1] = dIncl[dIncl.length - 1];
+        if (fb1 - fb0 >= 20 * S) break;
+        const bl = blockLines(fb0, fb1);
+        if (!bl.length) break;
+        const joined = bl.map(u => u.s).join(" ");
+        if (joined.length <= 45 && /^(\d+(\.\d+)*|[A-Z](\.\d+)+)\s/.test(joined)) {
+          farBoundary = Math.min(farBoundary, fb0); dIncl.pop();
+        }
+        else break;
+      }
+      const farBlankPx = dIncl.length
+        ? Math.max(0, farBoundary - dIncl[dIncl.length - 1][1] - 1) : 0;
+      return { incl: dIncl, rx0: drx0, rx1: drx1, stopReason,
+        farBlankPx, unprotectedBodyStops };
+    };
+
+    const buildDownCandidate = (seed, index, total, strictProseTail) => {
+      const seedGapPt = firstMeaningfulDownGap(seed);
+      dbg(`  Fig${num}: DOWN seed ${index + 1}/${total} ${seed.source}` +
+        ` x=[${seed.bx0.toFixed(0)},${seed.bx1.toFixed(0)}]` +
+        ` start=${downStart} capBottom=${capBottom.toFixed(1)}pt`);
+      const down = scanDown(seed.bx0, seed.bx1, strictProseTail);
+      if (!down.incl.length) return null;
+      const ry0 = down.incl[0][0], ry1 = down.incl[down.incl.length - 1][1];
+      const raster = down.incl.some(([a, b]) => hasImageIn(a, b, seed.bx0, seed.bx1));
+      /* 방향별 후보 생성기는 달라도 공통 figureScore/선택기로 합류한다. 좌/우는 Phase 2. */
+      const scanY0 = Math.max(0, Math.ceil(ry0)), scanY1 = Math.min(grid.H - 1, Math.floor(ry1));
+      const rowsHasInk = x => {
+        for (let yy = scanY0; yy <= scanY1; yy += 2) if (inkAt(grid, x, yy)) return true;
+        return false;
+      };
+      const forbid = [];
+      for (const u of lines) {
+        const c = (u.top + u.h / 2) * S;
+        if (c < ry0 || c > ry1) continue;
+        const owner = ownerByPart.get(u);
+        let bodyish = stoppers.has(u) || (!!owner && owner !== cap);
+        if (!bodyish && u.font === dom && u.h >= 6 && u.w >= 100) {
+          const nb = neighborsOf(u, lines);
+          bodyish = nb.above && nb.below;
+        }
+        if (bodyish) forbid.push([Math.round(u.left * S), Math.round((u.left + u.w) * S)]);
+      }
+      const inForbid = x => forbid.some(([a, b]) => x >= a && x <= b);
+      const tol = Math.round(12 * S);
+      const eR = grid.W, eL = 0;
+      let xx = down.rx1, gap2 = 0, lastInk = down.rx1;
+      while (xx < eR && gap2 < tol && !inForbid(xx)) {
+        if (rowsHasInk(xx)) { lastInk = xx + 1; gap2 = 0; } else gap2++;
+        xx++;
+      }
+      let nrx1 = Math.max(down.rx1, lastInk);
+      xx = down.rx0 - 1; gap2 = 0; lastInk = down.rx0;
+      while (xx >= eL && gap2 < tol && !inForbid(xx)) {
+        if (rowsHasInk(xx)) { lastInk = xx; gap2 = 0; } else gap2++;
+        xx--;
+      }
+      let nrx0 = Math.min(down.rx0, lastInk);
+      const textInStrip = (a, b) => lines.filter(u => {
+        const c = (u.top + u.h / 2) * S;
+        if (c < ry0 || c > ry1 || u.h < 6 || u.font !== dom) return false;
+        const ul = u.left * S, ur = (u.left + u.w) * S;
+        return Math.min(ur, b) - Math.max(ul, a) > 4;
+      }).length;
+      if (nrx0 < down.rx0 && textInStrip(nrx0, down.rx0) >= 3) nrx0 = down.rx0;
+      if (nrx1 > down.rx1 && textInStrip(down.rx1, nrx1) >= 3) nrx1 = down.rx1;
+      let fx0 = nrx1, fx1 = nrx0;
+      for (let x = nrx0; x < nrx1; x++) {
+        for (let yy = scanY0; yy <= scanY1; yy += 2) {
+          if (inkAt(grid, x, yy)) { fx0 = Math.min(fx0, x); fx1 = Math.max(fx1, x); break; }
+        }
+      }
+      if (fx0 > fx1) { fx0 = nrx0; fx1 = nrx1; }
+      /* 래스터 seed는 이미지 bbox 자체가 강한 x 경계다. 멀리 놓인 label 폭까지 강제로
+         합치면 Matsuzawa처럼 큰 빈 여백이 생기므로, cap 합집합은 vector/ink seed에만 쓴다. */
+      if (seed.source !== "image") {
+        fx0 = Math.min(fx0, Math.round(capbox.left * S));
+        fx1 = Math.max(fx1, Math.round((capbox.left + capbox.w) * S));
+      }
+      dbg(`  Fig${num}: DOWN REGION y[${ry0}-${ry1}] x[${fx0}-${fx1}]${raster ? " raster" : ""}`);
+      const finalBoxPt = { left: fx0 / S, w: (fx1 - fx0) / S };
+      const seedBoxPt = { left: seed.bx0, w: seed.bx1 - seed.bx0 };
+      const outsideSeedBodyStops = lines.filter(u => {
+        if (!stoppers.has(u)) return false;
+        const c = (u.top + u.h / 2) * S;
+        return c >= ry0 && c <= ry1 && ox(u, finalBoxPt) > 0.5 * u.w &&
+          ox(u, seedBoxPt) <= 0.5 * u.w;
+      }).length;
+      const metrics = measureCandidate("down", fx0, fx1, ry0, ry1, raster, down.stopReason,
+        down.unprotectedBodyStops + outsideSeedBodyStops, down.farBlankPx, seedGapPt);
+      const valid = seedGapPt <= 14 && metrics.widthRatio >= 0.15 && metrics.heightPt >= 24 &&
+        metrics.areaRatio >= 0.008 && metrics.inkDensity >= 0.002 &&
+        metrics.areaRatio <= 0.65 && metrics.heightRatio <= 0.82 && metrics.bodyStops <= 1;
+      return {
+        direction: "down",
+        seedSource: seed.source,
+        valid,
+        fig: { num, raster_: raster, page: pg.num,
+          x0: fx0 - 10, x1: fx1 + 10,
+          y0: Math.max(Math.round(capBottom * S) + 1, ry0 - 4), y1: Math.min(grid.H, ry1 + 8),
+          h_: Math.round(ry1 - cap.top * S), caption: capText, captionBox },
+        metrics,
+        score: figureScore(metrics)
+      };
+    };
+
+    const SIDE_MAX_GAP_PT = 36;
+    const label = capInfo.labelBox;
+    const labelT = Math.round(label.top * S);
+    const labelB = Math.round((label.top + label.h) * S);
+    const capT = Math.round(cap.top * S);
+    const capB = Math.round(capBottom * S);
+    const quantile = (values, q) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return sorted[Math.round((sorted.length - 1) * q)];
+    };
+    const captionColumnLines = [...ownCaptionLines];
+    const sideColumnLeftPt = Math.min(label.left,
+      quantile(captionColumnLines.map(u => u.left), 0.25));
+    const sideColumnRightPt = Math.max(label.left + label.w,
+      quantile(captionColumnLines.map(u => u.left + u.w), 0.75));
+    const sideL = Math.max(0, Math.round(sideColumnLeftPt * S));
+    const sideR = Math.min(grid.W, Math.round(sideColumnRightPt * S));
+    const sideColumnWidthPt = Math.max(0, sideColumnRightPt - sideColumnLeftPt);
+    const sideColumnCenterPt = (sideColumnLeftPt + sideColumnRightPt) / 2;
+    /* A broad left-half caption is commonly the caption below a half-width panel,
+       not a side caption (Payzan Fig3). Right-side editorial columns can be wider
+       (Monosov Fig5), so retain the broader allowance only on that side. */
+    const sideWidthLimit = sideColumnCenterPt < 0.45 * pg.w ? 0.34 : 0.48;
+    const sideShapeEligible = sideColumnWidthPt <= sideWidthLimit * pg.w;
+    const sideDirectionAllowed = direction => sideShapeEligible &&
+      (direction === "left" ? sideColumnCenterPt >= 0.45 * pg.w
+        : sideColumnCenterPt <= 0.55 * pg.w);
+    dbg(`  Fig${num}: SIDE-ANCHOR x=[${sideColumnLeftPt.toFixed(0)},` +
+      `${sideColumnRightPt.toFixed(0)}] w=${sideColumnWidthPt.toFixed(0)}pt` +
+      ` center=${(sideColumnCenterPt / pg.w).toFixed(2)}` +
+      ` limit=${sideWidthLimit.toFixed(2)} eligible=${sideShapeEligible ? 1 : 0}`);
+
+    const sideSeedBounds = direction => {
+      if (!sideDirectionAllowed(direction)) {
+        dbg(`  Fig${num}: ${direction.toUpperCase()} REJECT side-facing`);
+        return [];
+      }
+      const leftward = direction === "left";
+      const edgePt = leftward ? sideColumnLeftPt : sideColumnRightPt;
+      const edgePx = leftward ? sideL : sideR;
+      const seeds = [], imageSeeds = [];
+      for (const im of pg.images) {
+        const center = im.left + im.w / 2;
+        if (leftward ? center >= edgePt : center <= edgePt) continue;
+        const hgap = leftward ? edgePt - (im.left + im.w) : im.left - edgePt;
+        const vgap = im.top + im.h < cap.top ? cap.top - (im.top + im.h)
+          : im.top > capBottom ? im.top - capBottom : 0;
+        if (hgap >= -4 && hgap <= 72 && vgap <= 96)
+          imageSeeds.push({ by0: im.top, by1: im.top + im.h, source: "image",
+            hgap: Math.max(0, hgap), area: im.w * im.h });
+      }
+      imageSeeds.sort((a, b) => a.hgap - b.hgap || b.area - a.area || a.by0 - b.by0);
+      if (imageSeeds.length) seeds.push(imageSeeds[0]);
+
+      const start = leftward ? edgePx - 2 : edgePx + 2;
+      const bandSpan = Math.round(72 * S);
+      const band0 = leftward ? Math.max(0, start - bandSpan) : Math.max(0, start);
+      const band1 = leftward ? Math.min(grid.W - 1, start)
+        : Math.min(grid.W - 1, start + bandSpan);
+      const occupied = [];
+      if (band1 >= band0) {
+        for (let y = 0; y < grid.H; y++) {
+          let any = false;
+          for (let x = band0; x <= band1; x += 2) {
+            if (inkAt(grid, x, y)) { any = true; break; }
+          }
+          if (any) occupied.push(y);
+        }
+      }
+      const runs = [], JOIN = Math.round(8 * S);
+      for (const y of occupied) {
+        const last = runs[runs.length - 1];
+        if (!last || y - last.y1 > JOIN) runs.push({ y0: y, y1: y });
+        else last.y1 = y;
+      }
+      const nearbyRuns = runs.map(run => {
+        const gap = run.y1 < capT ? capT - run.y1 : run.y0 > capB ? run.y0 - capB : 0;
+        return { ...run, gap, height: run.y1 - run.y0 + 1 };
+      }).filter(run => run.gap <= 140 * S && run.height >= 4 * S)
+        .sort((a, b) => a.gap - b.gap || b.height - a.height || a.y0 - b.y0);
+      for (const run of nearbyRuns.slice(0, 2))
+        seeds.push({ by0: run.y0 / S, by1: (run.y1 + 1) / S, source: "ink" });
+      /* Keep the expanded caption band for horizontal component discovery. The
+         candidate builder separately uses mandatory labelBox rows as its vertical
+         origin, so swallowed prose cannot inflate the final figure height. */
+      seeds.push({ by0: cap.top, by1: capBottom, source: "caption" });
+
+      const unique = [];
+      for (const seed of seeds) {
+        const clipped = { by0: Math.max(0, Math.min(pg.h, seed.by0)),
+          by1: Math.max(0, Math.min(pg.h, seed.by1)), source: seed.source };
+        if (clipped.by1 <= clipped.by0) continue;
+        const key = Math.round(clipped.by0 * S) + ":" + Math.round(clipped.by1 * S);
+        if (!unique.some(u => u.key === key)) unique.push({ ...clipped, key });
+      }
+      return unique.map(({ key, ...seed }) => {
+        const overlappingCaptionLines = captionColumnLines.filter(u =>
+          Math.min(u.top + u.h, seed.by1) - Math.max(u.top, seed.by0) > 0.35 * u.h);
+        const seedEdgePt = leftward
+          ? Math.min(sideColumnLeftPt, ...overlappingCaptionLines.map(u => u.left))
+          : Math.max(sideColumnRightPt,
+            ...overlappingCaptionLines.map(u => u.left + u.w));
+        return { ...seed, edgePt: seedEdgePt };
+      });
+    };
+
+    const sideProfile = (direction, seed) => {
+      const leftward = direction === "left";
+      const edgePx = Math.max(0, Math.min(grid.W, Math.round(seed.edgePt * S)));
+      const rawStart = leftward ? edgePx - 2 : edgePx + 2;
+      const start = Math.max(0, Math.min(grid.W - 1, rawStart));
+      const maxD = Math.max(0, leftward ? start : grid.W - 1 - start);
+      const sy0 = Math.max(0, Math.min(grid.H - 1, Math.ceil(seed.by0 * S)));
+      const sy1 = Math.max(sy0, Math.min(grid.H - 1, Math.floor(seed.by1 * S)));
+      const seedHeight = Math.max(1, sy1 - sy0 + 1);
+      const xAt = d => leftward ? start - d : start + d;
+      const prof = new Int32Array(maxD + 1);
+      for (let d = 0; d <= maxD; d++) {
+        let count = 0;
+        const x = xAt(d);
+        for (let y = sy0; y <= sy1; y++) count += inkAt(grid, x, y);
+        prof[d] = count;
+      }
+      const thr = Math.max(2, Math.floor(0.002 * seedHeight));
+      const blank = d => prof[d] <= thr;
+      const SEP = Math.round(4.8 * S), MIN_W = Math.round(4 * S);
+      const blocks = [];
+      let d = 0;
+      while (d <= maxD) {
+        while (d <= maxD && blank(d)) d++;
+        if (d > maxD) break;
+        const b0 = d; let b1 = d, gap = 0;
+        while (d <= maxD) {
+          if (blank(d)) {
+            gap++;
+            if (gap >= SEP) { d++; break; }
+          } else { gap = 0; b1 = d; }
+          d++;
+        }
+        if (b1 - b0 + 1 >= MIN_W) blocks.push([b0, b1]);
+      }
+      return { leftward, edgePx, start, maxD, sy0, sy1, xAt, blocks };
+    };
+
+    const scanSide = (direction, seed) => {
+      const profile = sideProfile(direction, seed);
+      const toActual = ([d0, d1]) => profile.leftward
+        ? { x0: profile.start - d1, x1: profile.start - d0, d0, d1 }
+        : { x0: profile.start + d0, x1: profile.start + d1, d0, d1 };
+      const blockLines = block => lines.filter(u => {
+        const cx = (u.left + u.w / 2) * S;
+        const ut = u.top * S, ub = (u.top + u.h) * S;
+        const vertical = Math.min(ub, profile.sy1) - Math.max(ut, profile.sy0);
+        return cx >= block.x0 - 4 && cx <= block.x1 + 4 && vertical > 0.5 * u.h * S;
+      });
+      const xobjectProtects = u => seed.source === "image" && pg.images.some(im => {
+        const vertical = Math.min(im.top + im.h, u.top + u.h) - Math.max(im.top, u.top);
+        return vertical > 0.5 * u.h && ox(im, u) > 0.5 * u.w;
+      });
+      const blockHasImage = block => pg.images.some(im => {
+        const ix0 = im.left * S, ix1 = (im.left + im.w) * S;
+        const iy0 = im.top * S, iy1 = (im.top + im.h) * S;
+        return Math.min(ix1, block.x1) - Math.max(ix0, block.x0) > 8 &&
+          Math.min(iy1, profile.sy1) - Math.max(iy0, profile.sy0) > 8;
+      });
+      const blockHasFrame = block => {
+        const x0 = Math.max(0, Math.ceil(block.x0));
+        const x1 = Math.min(grid.W - 1, Math.floor(block.x1));
+        const y0 = profile.sy0, y1 = profile.sy1;
+        const w = x1 - x0 + 1, h = y1 - y0 + 1;
+        if (w < 18 || h < 18) return false;
+        const verticalEdge = left => {
+          for (let dx = 0; dx < 3; dx++) {
+            const x = left ? Math.min(x1, x0 + dx) : Math.max(x0, x1 - dx);
+            let run = 0, best = 0;
+            for (let y = y0; y <= y1; y++) {
+              run = inkAt(grid, x, y) ? run + 1 : 0;
+              if (run > best) best = run;
+            }
+            if (best >= 0.70 * h) return true;
+          }
+          return false;
+        };
+        const horizontalEdge = top => {
+          for (let dy = 0; dy < 4; dy++) {
+            const y = top ? Math.min(y1, y0 + dy) : Math.max(y0, y1 - dy);
+            let run = 0, best = 0;
+            for (let x = x0; x <= x1; x++) {
+              run = inkAt(grid, x, y) ? run + 1 : 0;
+              if (run > best) best = run;
+            }
+            if (best >= 0.65 * w) return true;
+          }
+          return false;
+        };
+        return verticalEdge(true) && verticalEdge(false) &&
+          horizontalEdge(true) && horizontalEdge(false);
+      };
+      const incl = [];
+      let stopReason = "page-edge", farBoundaryD = profile.maxD, bodyStops = 0;
+      for (const raw of profile.blocks) {
+        const block = toActual(raw);
+        const bl = blockLines(block);
+        const frame = blockHasFrame(block);
+        const others = otherCaps(bl, cap);
+        if (others.length) {
+          dbg(`    ${direction.toUpperCase()} col [${block.x0}-${block.x1}] OTHER-CAP stop`);
+          stopReason = "other-cap"; farBoundaryD = block.d0; break;
+        }
+        const marginal = bl.filter(u => (u.top < 56 || u.top + u.h > pg.h - 56) &&
+          !xobjectProtects(u));
+        if (marginal.length && !frame) {
+          dbg(`    ${direction.toUpperCase()} col [${block.x0}-${block.x1}] MARGIN stop`);
+          stopReason = marginal.some(u => u.top < 56) ? "header" : "footer";
+          farBoundaryD = block.d0; break;
+        }
+        const stopperLines = bl.filter(u => stoppers.has(u) &&
+          ownerByPart.get(u) !== cap && !ownCaptionLines.has(u));
+        const protectedStops = frame ? stopperLines.length
+          : stopperLines.filter(xobjectProtects).length;
+        const unprotected = stopperLines.length - protectedStops;
+        /* One chart label/source line is not enough to terminate a side figure.
+           Two independent body stoppers still cut prose columns immediately. */
+        const guard = 2;
+        if (unprotected >= guard) {
+          dbg(`    ${direction.toUpperCase()} col [${block.x0}-${block.x1}] BODY stop` +
+            ` (nstop=${stopperLines.length} protected=${protectedStops})`);
+          stopReason = "body"; farBoundaryD = block.d0; break;
+        }
+        dbg(`    ${direction.toUpperCase()} col [${block.x0}-${block.x1}]` +
+          ` lines=${bl.length} nstop=${stopperLines.length} protected=${protectedStops}` +
+          `${frame ? " frame" : ""} -> incl`);
+        incl.push({ ...block, frame, image: blockHasImage(block) });
+        bodyStops += unprotected;
+        if (block.d1 > 660 * S) {
+          stopReason = "max-span"; farBoundaryD = block.d1; break;
+        }
+      }
+      while (incl.length > 1) {
+        const near = incl[0], next = incl[1];
+        const nearLines = blockLines(near);
+        const width = near.d1 - near.d0 + 1;
+        const separation = next.d0 - near.d1 - 1;
+        const ordinarySliver = width < 8 * S && separation >= 4 * S && nearLines.length;
+        const captionEdgeBleed = seed.source === "caption" && near.d0 <= 4 * S &&
+          width < 24 * S && separation >= 8 * S;
+        if ((ordinarySliver || captionEdgeBleed) && !near.frame && !near.image) {
+          dbg(`    ${direction.toUpperCase()} NEAR-SLIVER drop [${near.x0}-${near.x1}]`);
+          incl.shift();
+        } else break;
+      }
+      for (let i = 0; i + 1 < incl.length; i++) {
+        const cur = incl[i], next = incl[i + 1];
+        const span = cur.d1 - incl[0].d0 + 1;
+        const gap = next.d0 - cur.d1 - 1;
+        const nextLines = blockLines(next);
+        const protectedBefore = incl.slice(0, i + 1).some(b => b.frame || b.image);
+        if (span >= 80 * S && gap >= 8 * S && protectedBefore && nextLines.length &&
+            !next.frame && !next.image && next.d1 - next.d0 + 1 <= 36 * S) {
+          dbg(`    ${direction.toUpperCase()} TEXT-TAIL stop [${next.x0}-${next.x1}]`);
+          stopReason = "text-tail"; farBoundaryD = Math.min(farBoundaryD, next.d0);
+          incl.splice(i + 1); break;
+        }
+      }
+      while (incl.length > 1) {
+        const far = incl[incl.length - 1], prev = incl[incl.length - 2];
+        const narrow = far.d1 - far.d0 < 12 * S;
+        const separation = far.d0 - prev.d1;
+        const outerPageGap = profile.leftward ? far.x0 : grid.W - 1 - far.x1;
+        const genericFarSliver = separation > 40 * S;
+        const edgeMarginalSliver = separation >= 24 * S && outerPageGap <= 20 * S;
+        if (narrow && (genericFarSliver || edgeMarginalSliver)) {
+          if (edgeMarginalSliver && !genericFarSliver)
+            dbg(`    ${direction.toUpperCase()} EDGE-MARGINAL-SLIVER drop` +
+              ` [${far.x0}-${far.x1}]`);
+          farBoundaryD = Math.min(farBoundaryD, far.d0); incl.pop();
+        } else break;
+      }
+      const gapPt = incl.length ? incl[0].d0 / S : Infinity;
+      const farBlankPx = incl.length
+        ? Math.max(0, farBoundaryD - incl[incl.length - 1].d1 - 1) : 0;
+      return { ...profile, incl, stopReason, bodyStops, farBlankPx, gapPt,
+        frameProtected: incl.some(block => block.frame) };
+    };
+
+    const buildSideCandidate = (direction, seed, index, total) => {
+      const side = scanSide(direction, seed);
+      const sideGapLimitPt = seed.source === "caption" ? 48 : SIDE_MAX_GAP_PT;
+      const gapText = Number.isFinite(side.gapPt) ? side.gapPt.toFixed(1) : "inf";
+      dbg(`  Fig${num}: ${direction.toUpperCase()} seed ${index + 1}/${total}` +
+        ` ${seed.source} y=[${seed.by0.toFixed(0)},${seed.by1.toFixed(0)}]` +
+        ` gap=${gapText}pt`);
+      if (side.gapPt > sideGapLimitPt || !side.incl.length) {
+        dbg(`  Fig${num}: ${direction.toUpperCase()} REJECT ` +
+          (!side.incl.length ? "no-block" : "gap"));
+        return null;
+      }
+
+      let fx0 = Math.min(...side.incl.map(b => b.x0));
+      let fx1 = Math.max(...side.incl.map(b => b.x1));
+      if (direction === "left") fx1 = Math.min(fx1, side.edgePx - 1);
+      else fx0 = Math.max(fx0, side.edgePx + 1);
+      if (fx1 <= fx0) return null;
+
+      const rowHasInk = y => {
+        for (let x = Math.max(0, Math.ceil(fx0));
+             x <= Math.min(grid.W - 1, Math.floor(fx1)); x += 2)
+          if (inkAt(grid, x, y)) return true;
+        return false;
+      };
+      const sparseVectorCaption = seed.source === "caption" &&
+        !side.incl.some(block => block.image);
+      const verticalSeedY0 = sparseVectorCaption ? labelT : side.sy0;
+      const verticalSeedY1 = sparseVectorCaption ? labelB : side.sy1;
+      const seedInkRows = [];
+      for (let y = verticalSeedY0; y <= verticalSeedY1; y++)
+        if (rowHasInk(y)) seedInkRows.push(y);
+      if (!seedInkRows.length) return null;
+
+      const sideBoxPt = { left: fx0 / S, w: (fx1 - fx0) / S };
+      const xobjectProtects = u => seed.source === "image" && pg.images.some(im => {
+        const vertical = Math.min(im.top + im.h, u.top + u.h) - Math.max(im.top, u.top);
+        return vertical > 0.5 * u.h && ox(im, u) > 0.5 * u.w;
+      });
+      const forbid = [];
+      for (const u of lines) {
+        if (ox(u, sideBoxPt) <= 0.5 * u.w) continue;
+        const owner = ownerByPart.get(u);
+        if (owner === cap || ownCaptionLines.has(u)) continue;
+        const otherCaption = !!owner && owner !== cap;
+        const marginal = u.top < 56 || u.top + u.h > pg.h - 56;
+        const body = stoppers.has(u);
+        if (!otherCaption && !body && !marginal) continue;
+        const cy = (u.top + u.h / 2) * S;
+        const frameProtects = side.frameProtected &&
+          cy >= verticalSeedY0 && cy <= verticalSeedY1;
+        if (!otherCaption && !marginal && body && (xobjectProtects(u) || frameProtects)) continue;
+        forbid.push([Math.max(0, Math.round(u.top * S) - 2),
+          Math.min(grid.H - 1, Math.round((u.top + u.h) * S) + 2)]);
+      }
+      const inForbid = y => forbid.some(([a, b]) => y >= a && y <= b);
+      /* Vector plots can have grid/mark rows more than 12pt apart. Caption-seeded
+         side candidates start from labelBox rows, so permit a wider blank bridge;
+         body/caption/header forbid intervals still terminate the expansion. */
+      const tol = Math.round((sparseVectorCaption ? 24 : 12) * S);
+      let fy0 = seedInkRows[0], fy1 = seedInkRows[seedInkRows.length - 1];
+      let y = fy0 - 1, blank = 0, lastInk = fy0;
+      while (y >= 0 && blank < tol && !inForbid(y)) {
+        if (rowHasInk(y)) { lastInk = y; blank = 0; } else blank++;
+        y--;
+      }
+      fy0 = lastInk;
+      y = fy1 + 1; blank = 0; lastInk = fy1;
+      while (y < grid.H && blank < tol && !inForbid(y)) {
+        if (rowHasInk(y)) { lastInk = y; blank = 0; } else blank++;
+        y++;
+      }
+      fy1 = lastInk;
+      if (fy1 <= fy0) return null;
+
+      const outsideSeedStops = lines.filter(u => {
+        if (!stoppers.has(u) || ownerByPart.get(u) === cap || ownCaptionLines.has(u) ||
+            xobjectProtects(u) || ox(u, sideBoxPt) <= 0.5 * u.w) return false;
+        const cy = (u.top + u.h / 2) * S;
+        return cy >= fy0 && cy <= fy1 &&
+          (cy < verticalSeedY0 || cy > verticalSeedY1);
+      }).length;
+      const bodyStops = side.bodyStops + outsideSeedStops;
+      const raster = hasImageIn(fy0, fy1, fx0 / S, fx1 / S);
+      const overlap = Math.max(0, Math.min(fy1, capB) - Math.max(fy0, capT));
+      const anchorOverlap = overlap /
+        Math.max(1, Math.min(fy1 - fy0, capB - capT));
+      const verticalGapPx = fy1 < capT ? capT - fy1 : fy0 > capB ? fy0 - capB : 0;
+      const aligned = anchorOverlap >= 0.25 || verticalGapPx <= 16 * S;
+      const metrics = measureCandidate(direction, fx0, fx1, fy0, fy1, raster,
+        side.stopReason, bodyStops, side.farBlankPx, side.gapPt);
+      const aspect = metrics.widthPt / Math.max(1, metrics.heightPt);
+      const reject = [];
+      if (side.gapPt > sideGapLimitPt) reject.push("gap");
+      if (metrics.widthPt < 24 || metrics.widthRatio < 0.15) reject.push("thin-width");
+      if (metrics.heightRatio < 0.09) reject.push("short-height");
+      if (metrics.areaRatio < 0.008) reject.push("small-area");
+      if (metrics.areaRatio > 0.65 || metrics.widthRatio > 0.82) reject.push("huge");
+      if (metrics.inkDensity < 0.002) reject.push("sparse");
+      if (metrics.bodyStops > 1) reject.push("body");
+      if (aspect < 0.50) reject.push("text-sliver");
+      if (!aligned) reject.push("unaligned");
+      const valid = reject.length === 0;
+      dbg(`  Fig${num}: ${direction.toUpperCase()} REGION x[${fx0}-${fx1}]` +
+        ` y[${fy0}-${fy1}] anchor=${anchorOverlap.toFixed(2)}` +
+        ` vgap=${(verticalGapPx / S).toFixed(1)}pt aspect=${aspect.toFixed(2)}` +
+        `${raster ? " raster" : ""}`);
+      let outX0 = Math.max(0, fx0 - 10), outX1 = Math.min(grid.W, fx1 + 10);
+      if (direction === "left") outX1 = Math.min(outX1, side.edgePx - 1);
+      else outX0 = Math.max(outX0, side.edgePx + 1);
+      if (outX1 <= outX0) return null;
+      const outY0 = Math.max(0, fy0 - 8), outY1 = Math.min(grid.H, fy1 + 4);
+      return { direction, seedSource: seed.source, anchorOverlap,
+        rejectReason: reject.join(","), valid,
+        fig: { num, raster_: raster, page: pg.num,
+          x0: outX0, x1: outX1,
+          y0: outY0, y1: outY1,
+          h_: Math.round(outY1 - outY0), caption: capText, captionBox },
+        metrics, score: figureScore(metrics) };
+    };
+
+    let upCandidate = null, legacyBelowCandidate = null;
 
     if (incl.length) {
       const ry0 = incl[incl.length - 1][0], ry1 = incl[0][1];
@@ -360,7 +1382,8 @@ function detectPage(pg, lines, dom, grid, dbg) {
       for (const u of lines) {
         const c = (u.top + u.h / 2) * S;
         if (c < ry0 || c > ry1) continue;
-        let bodyish = stoppers.has(u) || (isCaption(u) && u !== cap);
+        const owner = ownerByPart.get(u);
+        let bodyish = stoppers.has(u) || (!!owner && owner !== cap);
         if (!bodyish && u.font === dom && u.h >= 6 && u.w >= 100) {
           const nb = neighborsOf(u, lines);
           bodyish = nb.above && nb.below;  // 연속 문단의 내부 줄 (본문 폰트만)
@@ -403,9 +1426,17 @@ function detectPage(pg, lines, dom, grid, dbg) {
       fx1 = Math.max(fx1, Math.round((capbox.left + capbox.w) * S));
       dbg(`  Fig${num}: REGION y[${ry0}-${ry1}] x[${fx0}-${fx1}]${raster ? " raster" : ""}`);
       /* region은 그림 영역만 (캡션 제외). 캡션은 captionBox/caption 텍스트로 별도 반환 */
-      figs.push({ num, raster_: raster, page: pg.num,
-        x0: fx0 - 10, x1: fx1 + 10, y0: ry0 - 8, y1: ry1 + 4,
-        h_: Math.round(capBottom * S) - ry0, caption: capText, captionBox });
+      const metrics = measureCandidate("up", fx0, fx1, ry0, ry1, raster, upStopReason,
+        upBodyStops, upFarBlankPx);
+      upCandidate = {
+        direction: "up",
+        valid: true,
+        fig: { num, raster_: raster, page: pg.num,
+          x0: fx0 - 10, x1: fx1 + 10, y0: ry0 - 8, y1: ry1 + 4,
+          h_: Math.round(capBottom * S) - ry0, caption: capText, captionBox },
+        metrics,
+        score: figureScore(metrics)
+      };
     } else {
       /* caption-above 레이아웃: 아래쪽 이미지 */
       const below = pg.images.filter(im =>
@@ -415,12 +1446,135 @@ function detectPage(pg, lines, dom, grid, dbg) {
         const yb = Math.max(...below.map(im => im.top + im.h));
         const bx0 = Math.min(x0, ...below.map(im => im.left));
         const bx1 = Math.max(x1, ...below.map(im => im.left + im.w));
-        figs.push({ num, raster_: true, page: pg.num,
+        legacyBelowCandidate = { num, raster_: true, page: pg.num,
           x0: Math.round(bx0*S) - 10, x1: Math.round(bx1*S) + 10,
           y0: Math.round(capBottom*S) + 2, y1: Math.round(yb*S) + 4,
-          h_: Math.round((yb - cap.top)*S), caption: capText, captionBox });
+          h_: Math.round((yb - cap.top)*S), caption: capText, captionBox };
       }
     }
+
+    const downClose = downGapPt <= 14;
+    const upM = upCandidate && upCandidate.metrics;
+    const signals = {
+      /* 장문 캡션+빈 up은 side-caption일 수 있다(Carolyn p2). Phase 1의 empty 재시도는 맨 라벨만. */
+      empty: !upCandidate && bareLabel,
+      bareDown: bareLabel,
+      tiny: !!upM && (upM.areaRatio < 0.002 || upM.heightRatio < 0.012),
+      slender: !!upM && upM.widthRatio < 0.10 && upM.heightRatio > 0.12,
+      huge: !!upM && bareLabel && (upM.areaRatio > 0.65 || upM.heightRatio > 0.82),
+      body: !!upM && upM.stopReason === "body" && upStopNstop >= 2,
+      otherCap: !!upM && bareLabel && upM.stopReason === "other-cap"
+    };
+    const activeSignals = Object.keys(signals).filter(k => signals[k]);
+    const hardLong = capInfo.hard && capNorm.length > 16 && !!upM &&
+      upM.areaRatio < 0.002 && upM.heightRatio < 0.012 &&
+      upM.stopReason === "header" && upM.bodyStops === 0 &&
+      upM.farClosed && !upM.raster;
+    /* Phase 1 is limited to a standalone label immediately above its figure.
+       Multi-line captions can be followed by framed prose or prompt examples that
+       score like figures. Long hard captions enter only for the proven tiny/header signature. */
+    const suspicious = downClose &&
+      ((bareLabel && activeSignals.length > 0) || hardLong);
+    const gapText = Number.isFinite(downGapPt) ? downGapPt.toFixed(1) : "inf";
+    dbg(`  Fig${num}: SUSP bare=${bareLabel ? 1 : 0} hardLong=${hardLong ? 1 : 0}` +
+      ` downGap=${gapText}pt` +
+      ` upArea=${upM ? upM.areaRatio.toFixed(3) : "none"}` +
+      ` near=${downClose ? 1 : 0}` +
+      ` upStopN=${upStopNstop || 0}` +
+      ` upWH=${upM ? `${upM.widthRatio.toFixed(3)}/${upM.heightRatio.toFixed(3)}` : "none"}` +
+      ` flags=${activeSignals.length ? activeSignals.join(",") : "none"}`);
+
+    if (legacyBelowCandidate) {
+      /* 기존 이미지 전용 폴백은 산출을 byte-for-byte 보존한다. */
+      dbg(scoreText("up", upCandidate));
+      dbg(`  Fig${num}: SCORE down legacy-image`);
+      dbg(`  Fig${num}: CHOSE down legacy-image`);
+      figs.push(legacyBelowCandidate);
+      continue;
+    }
+
+    const downCandidates = suspicious
+      ? downSeeds.map((seed, i) => buildDownCandidate(seed, i, downSeeds.length, hardLong)).filter(Boolean)
+      : [];
+    const healthyBareUp = bareLabel && upCandidate && upCandidate.valid &&
+      Number.isFinite(upCandidate.score.total) && upCandidate.score.total >= 8;
+    if (healthyBareUp) dbg(`  Fig${num}: SIDE REJECT healthy-bare-up`);
+    const leftSeeds = healthyBareUp ? [] : sideSeedBounds("left");
+    const rightSeeds = healthyBareUp ? [] : sideSeedBounds("right");
+    const leftCandidates = leftSeeds
+      .map((seed, i) => buildSideCandidate("left", seed, i, leftSeeds.length)).filter(Boolean);
+    const rightCandidates = rightSeeds
+      .map((seed, i) => buildSideCandidate("right", seed, i, rightSeeds.length)).filter(Boolean);
+    const healthyUpForSide = upCandidate && upCandidate.valid &&
+      Number.isFinite(upCandidate.score.total) && upCandidate.score.total >= 8.0;
+    if (healthyUpForSide) {
+      for (const candidate of [...leftCandidates, ...rightCandidates]) {
+        if (!candidate.valid || candidate.anchorOverlap >= 0.25) continue;
+        candidate.valid = false;
+        candidate.rejectReason = [candidate.rejectReason, "detached-with-up"]
+          .filter(Boolean).join(",");
+        dbg(`  Fig${num}: ${candidate.direction.toUpperCase()} ${candidate.seedSource}` +
+          ` REJECT detached-with-up anchor=${candidate.anchorOverlap.toFixed(2)}` +
+          ` up=${upCandidate.score.total.toFixed(2)}`);
+      }
+    }
+    const suppressDominatedImageTail = candidates => {
+      for (const imageCandidate of candidates.filter(c => c.valid && c.seedSource === "image")) {
+        const tighter = candidates.filter(c => c.valid && c.seedSource !== "image" &&
+          c.metrics.raster &&
+          Number.isFinite(c.score.total) && c.score.total >= 10 &&
+          imageCandidate.score.total - c.score.total <= 1.6 &&
+          c.metrics.widthPt >= 0.85 * imageCandidate.metrics.widthPt &&
+          c.metrics.heightPt <= 0.75 * imageCandidate.metrics.heightPt)
+          .reduce((best, c) => !best || c.score.total > best.score.total ? c : best, null);
+        if (!tighter) continue;
+        imageCandidate.valid = false;
+        imageCandidate.rejectReason = [imageCandidate.rejectReason, "text-tail-dominated"]
+          .filter(Boolean).join(",");
+        dbg(`  Fig${num}: ${imageCandidate.direction.toUpperCase()} image REJECT` +
+          ` text-tail-dominated by ${tighter.seedSource}`);
+      }
+    };
+    suppressDominatedImageTail(leftCandidates);
+    suppressDominatedImageTail(rightCandidates);
+    const alternatives = [...downCandidates, ...leftCandidates, ...rightCandidates];
+    dbg(scoreText("up", upCandidate));
+    if (!downCandidates.length) dbg(scoreText("down", null));
+    else downCandidates.forEach((candidate, i) =>
+      dbg(scoreText(downCandidates.length > 1
+        ? `down#${i + 1}(${candidate.seedSource})` : "down", candidate)));
+    const debugSideScores = (direction, candidates) => {
+      if (!candidates.length) dbg(scoreText(direction, null));
+      else candidates.forEach((candidate, i) =>
+        dbg(scoreText(candidates.length > 1
+          ? `${direction}#${i + 1}(${candidate.seedSource})` : direction, candidate)));
+    };
+    debugSideScores("left", leftCandidates);
+    debugSideScores("right", rightCandidates);
+    const minScore = 8.0;
+    const eligible = downCandidates.filter(c => c.valid && Number.isFinite(c.score.total) &&
+      c.score.total >= minScore);
+    const bestDown = eligible.reduce((best, candidate) =>
+      !best || candidate.score.total > best.score.total ? candidate : best, null);
+    /* 맨 라벨의 up이 OTHER-CAP에 닿은 경우는 adjacent_figure 직접 증거다.
+       충분히 figure 크기인 유효 down이 있을 때만 작은 양의 우위도 허용한다. */
+    const adjacentEvidence = bareLabel && !!upM && upM.stopReason === "other-cap" && !!bestDown &&
+      bestDown.metrics.areaRatio >= 0.05 && bestDown.metrics.widthRatio >= 0.30 &&
+      bestDown.metrics.heightRatio >= 0.15;
+    const policy = { margin: 1.5, minScore,
+      marginFor: candidate => candidate.direction === "down" && adjacentEvidence ? 0.6 : 1.5 };
+    const decision = chooseCandidate(upCandidate, alternatives, policy);
+    const chosen = decision.candidate, chose = decision.direction;
+    const eligibleAlternatives = alternatives.filter(c => c.valid && Number.isFinite(c.score.total) &&
+      c.score.total >= minScore);
+    const bestAlternative = eligibleAlternatives.reduce((best, candidate) =>
+      !best || candidate.score.total > best.score.total ? candidate : best, null);
+    const delta = bestAlternative && upCandidate && Number.isFinite(upCandidate.score.total)
+      ? (bestAlternative.score.total - upCandidate.score.total).toFixed(2) : "n/a";
+    dbg(`  Fig${num}: CHOSE ${chose} margin=${decision.margin.toFixed(1)}` +
+      ` minAlt=${policy.minScore.toFixed(1)} delta=${delta}` +
+      ` seed=${chosen && chosen.seedSource ? chosen.seedSource : "-"}`);
+    if (chosen) figs.push(chosen.fig);
   }
   return figs;
 }
@@ -456,15 +1610,16 @@ async function extract(data, opts = {}) {
     const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
     const lines = buildLines(tc, vp.height);
+    const captionData = captionAnchors(lines);
     for (const l of lines) fontW[l.font] = (fontW[l.font] || 0) + l.w;
-    pageData.push({ page, num: p, w: vp.width, h: vp.height, lines });
+    pageData.push({ page, num: p, w: vp.width, h: vp.height, lines, captionData });
   }
   const dom = Object.entries(fontW).sort((a, b) => b[1] - a[1])[0]?.[0];
   /* 2차: 캡션 있는 페이지만 렌더 + 감지 */
   const allFigs = [];
   for (const pd of pageData) {
     checkAborted();
-    if (!pd.lines.some(isCaption)) continue;
+    if (!pd.captionData.anchors.length) continue;
     onProgress(`figure 감지… p.${pd.num}`);
     pd.images = await getImageBoxes(pd.page, pd.h);
     /* 페이지 렌더: 호스트(Margin 등)가 renderPage(pageNum, scale)를 주입하면 그걸 사용 */
@@ -493,7 +1648,7 @@ async function extract(data, opts = {}) {
       }
     }
     const grid = makeInk(canvas);
-    const figs = detectPage(pd, pd.lines, dom, grid, dbg);
+    const figs = detectPage(pd, pd.lines, dom, grid, dbg, pd.captionData);
     /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
      * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 경쟁은 같은 페이지 안에서만 발생하므로
      * dedup·최소 크기 필터를 페이지 단위로 끝내고, 살아남은 figure만 즉시 크롭해 보관한다.

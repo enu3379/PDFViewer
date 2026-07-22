@@ -71,6 +71,7 @@ M0 and M1 are complete. The first M2 implementation pass is complete and pushed,
 
 ## Next
 
+- 문서 정체성·싱크 재설계 (이슈 W-33): 사본이 주석을 공유하는 근본 원인은 `DocId=pdf.js 지문`이라 사본(동일 바이트)이 같은 버킷을 공유하기 때문. 은우와 설계 합의 완료(2026-07-10) — 정체성을 지문에서 분리한 **노드 그래프 + locator 키**(감시 없이 lazy), 다운로드/복제 **4종**(파일만/메모포함=자동연동/복제=형제규칙/export=분리루트), 싱크 상태 머신(단일 대상·분기검사), 지문은 다운로드 기록 매칭 전용. 설계 정본 [doc-identity-sync.md](doc-identity-sync.md) **v2.1 완성(2026-07-13)** — 보완 3건(§4.2 URL 정규화·§4.3 locator 우선·§5.1 삭제 수명주기)과 UX 안내 4건(§10) 확정, 역할 분담 §9.1. **Codex T1~T7 착수 가능, Claude는 D1~D5(배지·아이콘 사양, UI 문구, 플로우 명세, QA 가이드) 병행.**
 - 이슈 #1 대응: C1–C8 + 리뷰 후속 R1–R3 반영 완료 (`feature/1-open-ux` 브랜치) — macOS + Windows 수동 Chrome QA 필요.
 - 피규어 UX 개정: [figure-ux.md](figure-ux.md) 설계 확정(DC-F1=패널 경유, 참조↔피규어 양방향 링크, 점프 1/8 정렬+플래시, 카드 크롭 아이콘, 캡션 라벨) — `feature/figure-ux` 브랜치에서 G1–G8 구현 착수 가능.
 - Finish M2 manual QA fixes.

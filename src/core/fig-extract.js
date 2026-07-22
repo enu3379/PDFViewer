@@ -31,7 +31,33 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.9.3";
+const VERSION = "2.10.2";
+// 2.10.2: [계약 무변경] offset side-by-side 컬럼 분리 (S2 클러스터 A 2차) — baseline이 어긋난 나란한
+//        형제(키 큰/작은 이웃 — Dong Fig4는 Fig3보다 141pt 아래, same-baseline ≤24pt 규칙 밖)를 분리한다.
+//        v2.10.1 per-candidate clamp(same-baseline)은 그대로 두고, 페이지 말미에 **검출된 up-figure**
+//        기반 후처리를 추가: F·G 둘 다 up 후보이고 캡션 컬럼이 disjoint하며 두 영역이 **세로로 겹치면**
+//        (=같은 행) F의 침범한 x를 자기 캡션 가장자리±SIBLING_COL_MARGIN으로 되돌린다. 캡션 앵커가
+//        아니라 검출된 up-figure끼리 보는 게 3중 안전장치: ①up 한정(side/down 캡션은 figure와 다른
+//        컬럼이라 역클램프·소멸 위험 — Saunders Fig6·ieee side 방지) ②검출 figure만(phantom 상호참조
+//        "Fig. 3." CHOSE none 배제 — physrevb·ieee) ③영역 세로겹침(stacked 다른 행 배제 — acs·springer;
+//        진짜 전폭 figure는 겹치는 up-형제가 없어 자연 미클램프). 병합 블록 전폭이어도 크롭은 x-slice라
+//        분리. Dong Fig3@p6 other_fig_merged 완화(gate critical, IoU 0.43→0.86). same-baseline 제외로
+//        v2.10.1 게이트 결과(pdf2.0·Structural·Aegaeon) 보존. 전수 diff로 phantom·stacked·side 오클램프 0 확인.
+// 2.10.1: [계약 무변경] 나란한 컬럼 병합 방지 (S2 클러스터 A 1차) — 같은 baseline(캡션 라인 기준)의
+//        다른 컬럼 형제 figure가 있고 이 figure의 최종 x범위가 형제 캡션 컬럼으로 실제 침범했을 때만
+//        (crossing guard) 자기 캡션 가장자리로 x를 되돌린다(up 후보 post-scan x-clamp). 병합 블록은
+//        전폭이어도 크롭은 x-slice라 컬럼이 분리된다. crossing guard가 narrow 캡션 형제(Structural
+//        Fig9)의 과클립을 막고, 임베디드 형제(Aegaeon 15/16)·stacked·단일 figure는 자연 미발동.
+//        pdf2.0 Fig6/7·Structural Fig5/10 other_fig_merged 완화. Dong(offset side-by-side)은 후속.
+// 2.10.0: [계약 무변경] table 캡션 경계 (방출 없음) — "Table N"/"TABLE N"/자간분리 "T A B L E N"을
+//        경계로만 인식한다. table 캡션은 자기 table '위'에 있으므로, up-scan이 캡션 블록에 닿으면
+//        STOP하고 캡션 아래로 작은 갭(<TABLE_GAP_PT)으로 이어지는 블록 run(=table 본체)을 소급 제외한다
+//        (★ 방향 함정: OTHER-CAP의 "캡션 아래 포함"을 table에 쓰면 정반대로 동작). 종결 갭 없이 전부
+//        먹으면 롤백을 취소해 figure 손실을 막는다(병합 케이스 방어). 가드: incl 비었을 때·블록 높이
+//        >TABLE_CAP_BLOCK_MAX·BODY stop 우선(본문 "Table 1. ..." 오탐이 stopper로 먼저 걸림)에서 미발동.
+//        문법은 isCaption과 동일(hard 구분자 . : | 또는 짧은 무구분자·자간분리). 방출·prefilter·truth 행 없음.
+//        Blockchain Fig4/18·Structural Fig13의 other_fig_merged 완화. (무구분자 "TABLE N <제목>" soft
+//        표기는 미지원 — figure soft 캡션(v2.9.1)처럼 문서 게이트가 필요해 후속으로 분리.)
 // 2.9.3: [계약 무변경] 줄끝 종결형 길이 가드에서 접두어 길이 제외 — "Extended Data Fig. 1"처럼
 //        번호 뒤 구두점 없이 끝나는 접두 계열 라벨이 접두어("Extended Data " 14자)만으로 14자
 //        예산을 소진해 거부되던 문제. 가드는 "라벨에 딸린 텍스트 분량"을 재려는 것이므로
@@ -105,6 +131,15 @@ const SOFT_BODY_RE2 = /^(?:[a-z](?:[–—-][a-z])*)?[A-Z(\[“‘"•]/;
 const SOFT_SPACED_RE = /^(?:[A-Za-z]\s){3,}/;
 const SOFT_DOC_HARD_MAX = 0;   // 문서의 hard 앵커 총수 상한 (초과 시 soft 전량 기각)
 const SOFT_FORM_MIN     = 2;   // 같은 라벨폼이 문서 내 반복돼야 하는 최소 횟수
+/* ---- table 캡션 (v2.10.0): 방출하지 않고 경계로만 쓴다. isCaption과 동일한 번호·구분자 문법의 table
+ * 버전 — 단 대문자 Table/TABLE만 허용해 본문 "table 3. With ..." 소문자 오탐을 배제한다. 무구분자
+ * "TABLE N <제목>"(Frontiers/Springer soft 표기)은 미지원(후속 — 문서 게이트 필요, figure v2.9.1과 동형). ---- */
+const TABLE_CAP_RE  = /^(?:Table|TABLE)\s*\.?\s*(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)\s*([.:|]|$)/;
+const TABLE_CAP_RE2 = /^(?:Table|TABLE)\.?(\d+(?:\.\d+)?|[A-D]\.\d+|[IVXLC]+)([.:|]|$)/;
+const TABLE_GAP_PT = 15;         // 롤백 run 연결 임계 (블록 분리 4.8pt < T < 상단 슬리버 40pt; gate 표적 창 교집합)
+const TABLE_CAP_BLOCK_MAX = 60;  // 이보다 높은 블록의 table 캡션은 figure와 병합된 것으로 보고 미발동(Aegaeon 8@p8 방어)
+const SAME_BASELINE_PT = 24;     // 나란한 컬럼 형제 판정 — 캡션 라인 baseline 차(v2.10.1). stacked(Δ≥100) 배제
+const SIBLING_COL_MARGIN = 12;   // 자기 캡션 가장자리 밖으로 그래픽이 살짝 넓을 여지 (v2.10.1·v2.10.2 공용)
 const S = 2.2;             // 분석/크롭 렌더 스케일 (px per pt)
 
 /* ===================== 기하 유틸 ===================== */
@@ -191,6 +226,24 @@ function isCaption(line) {
   }
   if (![".", ":", "|"].includes(match.sep) && line.s.length - match.lead > 14) return null;
   return match.num;
+}
+
+/* table 캡션 판별 (v2.10.0) — isCaption과 동일 규율의 table 버전. 방출하지 않고 경계로만 소비한다.
+ * hard 구분자(. : |)는 항상, 무구분자(자간분리 "T A B L E N" 포함)는 짧을 때만 허용(isCaption 12/14자 가드).
+ * 대문자 Table/TABLE만 매칭해 본문 "table 3. With longer ..." 소문자 상호참조를 배제한다. */
+function isTableCaption(line) {
+  let m = TABLE_CAP_RE.exec(line.s);
+  if (m) {
+    if (![".", ":", "|"].includes(m[2]) && line.s.length > 14) return false;
+    return true;
+  }
+  const stripped = line.s.replace(/\s+/g, "");
+  m = TABLE_CAP_RE2.exec(stripped);
+  if (m) {
+    if (![".", ":", "|"].includes(m[2]) && stripped.length > 12) return false;
+    return true;
+  }
+  return false;
 }
 
 /* isCaption이 거부한 라인 중 "번호 뒤 구분자 없는 캡션"만 골라낸다 (v2.9.1).
@@ -611,9 +664,13 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
   }));
   /* 서브패널 라벨 면제 대상 (v2.9.0) — 픽셀 블록 스캔의 첫 블록 BODY stop에서만 소비 */
   const subPanel = subpanelStoppers(lines, stoppers, dom);
+  /* table 캡션 경계 (v2.10.0) — 페이지 전역. figure 앵커(caps)와 섞지 않는다: 방출·prefilter 대상이 아니다. */
+  const tableStop = new Set(lines.filter(isTableCaption));
   dbg(`[p${pg.num}] lines=${lines.length} imgs=${pg.images.length} caps=${caps.map(c=>JSON.stringify(c.s.slice(0,30))).join(" ")}`);
   if (subPanel.size)
     dbg(`  subpanel=${subPanel.size} ${[...subPanel].slice(0, 4).map(u => JSON.stringify(u.s.slice(0, 22))).join(" ")}`);
+  if (tableStop.size)
+    dbg(`  tables=${tableStop.size} ${[...tableStop].slice(0, 4).map(u => JSON.stringify(u.s.slice(0, 22))).join(" ")}`);
   for (const cap of caps) {
     const capInfo = infoByAnchor.get(cap);
     const num = capInfo.num;
@@ -773,6 +830,25 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         if (nstop >= guard && !subpanelPass && !hasBorder(b0, b1) && !hasImage(b0, b1)) {
           dbg(`    blk [${b0}-${b1}] BODY stop (nstop=${nstop})`);
           stopReason = "body"; stopNstop = nstop; farBoundary = b1; break;
+        }
+        /* table 캡션 경계 (v2.10.0) — ★ BODY stop '뒤'에 둔다. table은 자기 table '위'에 있어, up-scan이
+         * 캡션에 닿을 땐 table 본체가 이미 아래로 포함된 뒤다. 여기서 STOP하고 캡션 아래로 작은 갭
+         * (<TABLE_GAP_PT)으로 이어지는 블록 run(=table 본체)을 소급 제외한다. 종결 갭 없이 incl 전부를
+         * 먹으면 롤백을 취소해 figure 손실을 막는다(병합 케이스 방어). incl 비었을 때(첫 블록)·거대 블록
+         * (figure와 한 덩어리)에서는 미발동 → Aegaeon 8@p8 무회귀. BODY보다 뒤라 본문 "Table 1. The
+         * results ..." 같은 오탐은 stopper로 먼저 BODY stop되어 여기 닿지 않는다(gate 표적 캡션은 nstop=0). */
+        if (incl.length && (b1 - b0) <= TABLE_CAP_BLOCK_MAX * S && bl.some(u => tableStop.has(u))) {
+          const T = TABLE_GAP_PT * S;
+          let keep = incl.length, prevTop = b1;
+          for (let i = incl.length - 1; i >= 0; i--) {
+            if (incl[i][0] - prevTop >= T) { keep = i + 1; break; }
+            prevTop = incl[i][1];
+          }
+          const removed = incl.length - keep;
+          farBoundary = keep < incl.length ? incl[keep][1] : b1;
+          incl.length = keep;
+          dbg(`    blk [${b0}-${b1}] TABLE stop (rollback ${removed}${removed ? "" : " abort"})`);
+          stopReason = "table"; break;
         }
         if (subpanelPass) dbg(`    blk [${b0}-${b1}] SUBPANEL pass (nstop=${nstop})`);
         dbg(`    blk [${b0}-${b1}] lines=${bl.length} nstop=${nstop} -> incl`);
@@ -1703,6 +1779,23 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       if (fx0 > fx1) { fx0 = nrx0; fx1 = nrx1; }
       fx0 = Math.min(fx0, Math.round(capbox.left * S));
       fx1 = Math.max(fx1, Math.round((capbox.left + capbox.w) * S));
+      /* 나란한 컬럼 병합 방지 (v2.10.1) — 같은 baseline(캡션 라인 기준)의 **다른 컬럼** 형제 figure
+       * 캡션이 있고, 이 figure의 x범위가 그 형제 캡션 컬럼으로 **실제 침범**했으면(★crossing guard),
+       * 자기 캡션 가장자리+margin으로 되돌린다. 병합 블록은 전폭이어도 크롭은 x-slice라 컬럼이 분리된다.
+       * crossing guard가 핵심 — narrow 캡션 형제(Structural Fig9 "F I G U R E 9")가 자기 컬럼을 침범하지
+       * 않으면 미발동(그 figure를 과클립하지 않음). 임베디드 형제(Aegaeon 15/16)는 이미 sibL/sibR로
+       * 분리돼 fx가 형제 캡션을 안 넘어 crossing guard에서 자연 배제된다. pdf2.0 6/7·Structural 5/10.
+       * (baseline이 어긋난 나란한 형제(Dong 3@p6)는 여기서 안 잡히고 페이지 말미 offset 후처리가 담당.) */
+      const capBaseY = cap.top + cap.h / 2, capRpt = capbox.left + capbox.w;
+      for (const oc of caps) {
+        if (oc === cap || Math.abs((oc.top + oc.h / 2) - capBaseY) > SAME_BASELINE_PT) continue;
+        const ocL = oc.left, ocR = oc.left + oc.w;
+        if (ocL > capRpt) {                                  // 형제가 우측 컬럼
+          if (fx1 > ocL * S) fx1 = Math.min(fx1, Math.round((capRpt + SIBLING_COL_MARGIN) * S));
+        } else if (ocR < capbox.left) {                      // 형제가 좌측 컬럼
+          if (fx0 < ocR * S) fx0 = Math.max(fx0, Math.round((capbox.left - SIBLING_COL_MARGIN) * S));
+        }
+      }
       dbg(`  Fig${num}: REGION y[${ry0}-${ry1}] x[${fx0}-${fx1}]${raster ? " raster" : ""}`);
       /* region은 그림 영역만 (캡션 제외). 캡션은 captionBox/caption 텍스트로 별도 반환 */
       const metrics = measureCandidate("up", fx0, fx1, ry0, ry1, raster, upStopReason,
@@ -1853,7 +1946,36 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     dbg(`  Fig${num}: CHOSE ${chose} margin=${decision.margin.toFixed(1)}` +
       ` minAlt=${policy.minScore.toFixed(1)} delta=${delta}` +
       ` seed=${chosen && chosen.seedSource ? chosen.seedSource : "-"}`);
-    if (chosen) figs.push(chosen.fig);
+    if (chosen) { chosen.fig.dir_ = chose; figs.push(chosen.fig); }
+  }
+  /* offset side-by-side 컬럼 분리 (v2.10.2) — 같은 baseline 형제는 위 per-candidate clamp(v2.10.1)가
+   * 이미 처리한다. 여기서는 baseline이 어긋난 나란한 형제(키 큰/작은 이웃 — Dong Fig4는 Fig3보다
+   * 141pt 아래)를 **검출된 up-figure 영역**으로 판정한다: F·G 둘 다 up 후보이고(캡션이 figure 아래
+   * 같은 컬럼), 캡션 컬럼이 disjoint하며 두 영역이 세로로 겹치면(=같은 행) F가 침범한 쪽 x를 자기
+   * 캡션 가장자리±margin으로 되돌린다.
+   * ★ 캡션 앵커가 아니라 **검출된 up-figure**끼리 보는 게 핵심 3중 안전장치:
+   *   ① up 한정 — side/down 캡션(figure와 다른 컬럼: Saunders Fig6·ieee tnnls side)이 자기 캡션 컬럼으로
+   *      역클램프돼 소멸하는 것 방지. up은 캡션이 figure 아래 같은 컬럼이라 clamp 방향이 항상 정합.
+   *   ② 검출된 figure만 — phantom 앵커(본문 상호참조 "Fig. 3." CHOSE none)는 figs에 없어 형제 배제.
+   *   ③ 영역 세로 겹침 — stacked(위아래 다른 행: acs·springer) 배제. 진짜 전폭 figure는 옆에 겹치는
+   *      up-형제가 없으므로(있으면 전폭이 아님) 자연히 미클램프(ieee tnnls Fig9 무변경).
+   * same-baseline은 위 per-candidate가 처리하므로 제외 → v2.10.1 게이트 결과(pdf2.0·Structural·Aegaeon) 보존. */
+  for (const F of figs) {
+    if (F.dir_ !== "up" || !F.captionBox) continue;
+    const fCapL = F.captionBox.x0, fCapR = F.captionBox.x1;
+    const fBaseY = (F.captionBox.y0 + F.captionBox.y1) / 2;
+    for (const G of figs) {
+      if (G === F || G.dir_ !== "up" || !G.captionBox) continue;
+      const gBaseY = (G.captionBox.y0 + G.captionBox.y1) / 2;
+      if (Math.abs(gBaseY - fBaseY) <= SAME_BASELINE_PT) continue;      // same-baseline → v2.10.1 per-candidate
+      if (Math.min(F.y1, G.y1) - Math.max(F.y0, G.y0) <= 0) continue;   // 영역 세로 겹침 없으면 다른 행(stacked)
+      const gCapL = G.captionBox.x0, gCapR = G.captionBox.x1;
+      if (gCapL > fCapR) {                                              // G가 우측 컬럼
+        if (F.x1 > gCapL * S) F.x1 = Math.min(F.x1, Math.round((fCapR + SIBLING_COL_MARGIN) * S) + 10);
+      } else if (gCapR < fCapL) {                                       // G가 좌측 컬럼
+        if (F.x0 < gCapR * S) F.x0 = Math.max(F.x0, Math.round((fCapL - SIBLING_COL_MARGIN) * S) - 10);
+      }
+    }
   }
   return figs;
 }
@@ -1958,6 +2080,7 @@ async function extract(data, opts = {}) {
                        x1: +f.captionBox.x1.toFixed(1), y1: +f.captionBox.y1.toFixed(1) };
     delete f.captionBox;
     delete f.raster_;
+    delete f.dir_;
     f.confidence = 1.0; // 당분간 고정 (Margin FigureEntry.confidence 대응)
   }
   /* 후처리: 번호 공백 추론 — 감지된 정수 번호 1..최대 중 빠진 번호 = 미탐지 의심.
@@ -1988,7 +2111,7 @@ const cropCanvas = f => f.cropCanvas;
 const cropDataURL = f => f.cropCanvas.toDataURL("image/png");
 const cropBlob = f => new Promise(res => f.cropCanvas.toBlob(res, "image/png"));
 
-return { VERSION, extract, cropCanvas, cropDataURL, cropBlob, isCaption, buildLines };
+return { VERSION, extract, cropCanvas, cropDataURL, cropBlob, isCaption, isTableCaption, buildLines };
 
 })();
 

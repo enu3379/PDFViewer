@@ -31,7 +31,16 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.11.0";
+const VERSION = "2.12.0";
+// 2.12.0: [계약 무변경] hugePenalty 전면 figure 오발 완화 — Nature Extended Data류 전면 figure(up 영역이
+//        페이지의 65~78% 차지)가 hugePenalty(-8)를 맞아 healthy(≥8) 문턱 아래로 눌리면, ⓐ up 점수 직접
+//        하락 + ⓑ detached-with-up side 거부(up≥8 조건)가 꺼져 작은 side 크롭에 짐 → clip. **up 방향이고
+//        bodyStops=0(본문 stop 없음)이며 (farClosed || !raster)일 때 hugePenalty 면제**한다 — 진짜 전면
+//        figure는 far 경계가 닫혔거나 벡터로 채워지고, `!farClosed && raster`는 경계 안 닫힌 영역이 raster
+//        너머로 over-reach한 것이라 벌점 유지(Simões 4@6 칼럼폭 over-grab 회귀 방지). body>0·side는 무변경.
+//        전수 diff 회귀 감사(v2.11.0↔): gate FIX 8 critical clip(Xue ED.1/2/6/9·Simões ED.9·Luques 3/ED.3·
+//        Paul ED.4) + Structural 13@14 보너스, gate REGRESS 0. measureCandidate가 metrics.direction을 실어
+//        figureScore가 up 한정 판정.
 // 2.11.0: [계약 무변경] 캡션 문법 확장 (M1 점없는 문자+숫자 번호 · M2 괄호 한정구) — 보충/부록 캡션의
 //        모든 표면표기를 탐지해 canonical(점형 S.N·A.N·ED.N)로 방출한다(EVAL §4.5 정체성 규약). 세 갈래:
 //        ① inline 문자+숫자 — "FIG. S1." "Fig. S1:" "Figure S1" "Figure S.1" "Figure A1"(점 유무·구분자
@@ -673,7 +682,14 @@ function figureScore(m) {
   const bodyPenalty = Math.min(6, m.bodyStops * 1.5);
   const tinyPenalty = (m.areaRatio < 0.002 || m.heightRatio < 0.012) ? 8 : 0;
   const slenderPenalty = (m.widthRatio < 0.10 && m.heightRatio > 0.12) ? 5 : 0;
-  const hugePenalty = (m.areaRatio > 0.65 || m.heightRatio > 0.82) ? 8 : 0;
+  /* hugePenalty: 영역이 페이지를 통째로 삼키는 over-grab 방지. 단 up 방향이고 bodyStops=0이며
+     (farClosed || !raster)일 때 면제한다(v2.12.0) — 본문을 문 흔적 없는 진짜 전면 figure(Nature
+     Extended Data류)는 far 경계가 닫혔거나(farClosed) 벡터로 영역을 채운다(raster=0). 반면
+     `!farClosed && raster`는 경계가 안 닫힌(ink가 far 경계까지 이어지는) 영역 안에 raster figure가
+     든 형태 = raster 너머로 over-reach한 것이라 벌점 유지(Simões 4@6 회귀 방지). over-grab은
+     본문을 삼켜 bodyStops>0이므로 여전히 벌점, side 후보도 무변경(full-height 보호 유지). */
+  const hugeExempt = m.direction === "up" && m.bodyStops === 0 && (m.farClosed || !m.raster);
+  const hugePenalty = (!hugeExempt && (m.areaRatio > 0.65 || m.heightRatio > 0.82)) ? 8 : 0;
   const otherCapPenalty = m.stopReason === "other-cap" ? 0.5 : 0;
   const total = area + width + height + density + proximity + boundary + raster
     - bodyPenalty - tinyPenalty - slenderPenalty - hugePenalty - otherCapPenalty;
@@ -976,7 +992,8 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         farBlankPx,
         farClosed: farBlankPx >= Math.round(4.8 * S),
         raster,
-        stopReason
+        stopReason,
+        direction: dir
       };
     };
     const scoreText = (dir, candidate) => {

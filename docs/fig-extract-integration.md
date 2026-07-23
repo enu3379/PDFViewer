@@ -77,6 +77,7 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 - **번호 글리프에 ToUnicode 매핑이 없는 PDF는 원리상 미탐지**: 번호가 화면에는 정상으로 보이는데 텍스트 레이어에 문자가 없는 문서가 있다(Wiley 일부). 엔진이 아니라 PDF 쪽 문제라 사용자 눈에는 "번호가 멀쩡히 보이는데 안 잡힌다"로 보인다 — 문의가 오면 수동 크롭 안내가 맞다.
 - **영역 경계 정밀화 (v2.10.x)**: figure/table·나란한 컬럼 경계 판정을 개선했다 — table 캡션을 **경계로만** 인식해 인접 figure 크롭에서 table을 제외(v2.10.0, table 자체 방출은 없음), 좌우로 나란한 두 figure가 서로를 통째로 크롭하던 것을 각자 캡션 컬럼으로 분리(v2.10.1 같은 baseline, v2.10.2 baseline 어긋난 offset). 출력 필드·좌표계·(num,page) 식별자 불변 — bbox가 더 타이트해질 뿐이라 소비자 코드 변경은 불요.
 - **캡션 문법 확대 (v2.11.0)**: 보충·부록 캡션의 inline 표기를 새로 잡는다 — `Fig. S1.`·`Figure S1:`·`Figure A1.`(문자접두 번호), `Supplemental`/`Supporting Figure N`(접두), `FIG. 3 (color online).`·`Figure 1 (저자명).`(괄호 한정구). 전부 **점형 canonical**(`S.N`·`A.N`)으로 방출하므로 `num` 필드에 `"S.1"`·`"A.1"` 형태가 더 자주 등장한다(v2.6.0의 `ED.N`·prefix `S.N`과 동일한 표기 규약 — 새 값 형태 아님). 출력 필드·좌표계·(num,page) 식별자·manifest 스키마 불변, 소비자 코드 변경 불요. 주의: 한 물리 figure의 캡션에 다른 계열 라벨이 중첩된 오제출 문서(예: Extended Data 캡션 본문에 `Figure S1.`)는 같은 그림을 `ED.N`+`S.N` 두 번 방출할 수 있다(candidate suppression 미구현 — 엔진 repo 백로그, n=1 코너).
+- **전면 figure 크롭 개선 (v2.12.0)**: Nature Extended Data류 **전면(full-page) figure**가 과대 패널티에 눌려 페이지 일부만 크롭되던 것을 해소했다 — 전면 figure의 크롭 영역이 더 정확(전체)해진다. 출력 필드·좌표계·(num,page)·manifest 스키마 불변, 소비자 코드 변경 불요(bbox가 truth에 더 가까워질 뿐).
 - 엔진은 백그라운드 탭에서 크롬 타이머 스로틀링의 영향을 받는다(분석이 수십 배 느려짐).
   전체 문서 스캔은 사용자가 뷰어를 보고 있는 동안 idle로 돌리는 것을 권장.
 

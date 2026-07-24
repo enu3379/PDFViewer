@@ -31,7 +31,27 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.12.0";
+const VERSION = "2.13.1";
+// 2.13.1: [계약 무변경] hugeExempt 커버리지 면제에 widthRatio ≥ HUGE_WIDTH_MIN(0.60) 폭 바닥 가드 추가.
+//        coverage(=잉크 90% 질량 최소폭 ÷ 후보 폭)는 후보 '자기 폭' 기준 밀도라, hugeCond가 heightRatio>0.82
+//        단독으로 발동하는 좁고 긴 raster 후보(자기 폭 안 잉크 조밀 → coverage↑)도 면제되는 사각이 있었다
+//        (CodeRabbit PR#31 Major 지적, 전수 실측 1건: Blockchain 2@36 widthRatio 0.47 coverage 0.73). 페이지
+//        폭의 60% 미만이면 '전폭'이 아니므로 coverage 면제 불허(프록시 farClosed‖!raster 경로는 무관). clip
+//        표적 전건 widthRatio ≥ 0.82라 무영향, Blockchain 2는 v2.12.1부터 벌점 상태로도 chose=up이라 선택 불변
+//        → 전수 diff 0(하드닝). 견고성 gap 차단(좁고 긴 over-grab의 잠재 false positive).
+// 2.13.0: [계약 무변경] hugePenalty 전면 figure 오발 근본 해결 — 수평 잉크 커버리지 판별자 신설. v2.12.0
+//        프록시 (farClosed‖!raster)의 사각(신규 Nature 2026 전폭 clip은 `!farClosed && raster`라 미면제)을
+//        해소. measureCandidate가 up+huge 영역에서 잉크 90% 질량을 담는 최소 연속 컬럼 폭/영역 폭 =
+//        coverage를 산출(내부 패널 갭에 강건, over-grab은 한쪽이 비어 낮음). hugeExempt에 `coverage ≥
+//        HUGE_COVERAGE_MIN(0.54)` OR 조건으로 보강 — 프록시 면제분은 커버리지 무관하게 유지(회귀 0 보장).
+//        전수 실측 분리: clip 표적 11건 coverage min 0.58 vs Simões4 over-grab 0.50, 임계 0.54. clip 해소
+//        11건(Tsyporin 4·Vaquero 1/2/4/ED.3/ED.8/ED.11·Yue 4·Pan ED.1/ED.2/ED.11) + Simões4/Pandey3 가드 유지.
+// 2.12.1: [계약 무변경] 위생 — hugeExempt의 죽은 가드 `bodyStops===0` 제거(동작 무변경, diff 0).
+//        up 스캔(scan)은 body 블록을 만나면 그 블록을 영역에서 제외하고 stop하므로(line ~904 break)
+//        up 영역은 구조적으로 body를 포함하지 않아 upBodyStops는 항상 0 — 이 조건은 up 방향에서 항상
+//        참이라 무의미했다. `up && (farClosed || !raster)`로 단순화하고 이유를 주석화. (CodeRabbit
+//        PR#30 지적: 가드가 no-op이라는 관찰은 맞음. 단 봇 제안 "제외된 body 블록의 stopNstop을
+//        카운트"는 의미상 오류 — body를 제외한 정상 up 후보 7건에 틀린 bodyPenalty를 매겨 미채택.)
 // 2.12.0: [계약 무변경] hugePenalty 전면 figure 오발 완화 — Nature Extended Data류 전면 figure(up 영역이
 //        페이지의 65~78% 차지)가 hugePenalty(-8)를 맞아 healthy(≥8) 문턱 아래로 눌리면, ⓐ up 점수 직접
 //        하락 + ⓑ detached-with-up side 거부(up≥8 조건)가 꺼져 작은 side 크롭에 짐 → clip. **up 방향이고
@@ -177,6 +197,13 @@ const TABLE_GAP_PT = 15;         // 롤백 run 연결 임계 (블록 분리 4.8p
 const TABLE_CAP_BLOCK_MAX = 60;  // 이보다 높은 블록의 table 캡션은 figure와 병합된 것으로 보고 미발동(Aegaeon 8@p8 방어)
 const SAME_BASELINE_PT = 24;     // 나란한 컬럼 형제 판정 — 캡션 라인 baseline 차(v2.10.1). stacked(Δ≥100) 배제
 const SIBLING_COL_MARGIN = 12;   // 자기 캡션 가장자리 밖으로 그래픽이 살짝 넓을 여지 (v2.10.1·v2.10.2 공용)
+const HUGE_COVERAGE_MIN = 0.54;  // hugePenalty 면제 커버리지 임계 (v2.13.0) — 잉크 90% 질량 폭이 영역 폭의
+                                 // 이 비율 이상이면 진짜 전폭 figure로 보고 면제. clip 표적 min 0.58 vs
+                                 // Simões4 over-grab 0.50 분리점(전수 실측). farClosed‖!raster 프록시에 보강(OR).
+const HUGE_WIDTH_MIN = 0.60;     // coverage 면제 폭 바닥 가드 (v2.13.1) — coverage는 후보 '자기 폭' 기준
+                                 // 밀도라 좁고 긴 후보(hugeCond가 heightRatio>0.82 단독 발동)도 자기 폭 안
+                                 // 잉크가 조밀하면 면제될 수 있다. 페이지 폭의 이 비율 미만이면 '전폭'이
+                                 // 아니므로 coverage 면제를 불허(프록시 경로는 무관). clip 전건 widthRatio≥0.82.
 const S = 2.2;             // 분석/크롭 렌더 스케일 (px per pt)
 
 /* ===================== 기하 유틸 ===================== */
@@ -682,13 +709,20 @@ function figureScore(m) {
   const bodyPenalty = Math.min(6, m.bodyStops * 1.5);
   const tinyPenalty = (m.areaRatio < 0.002 || m.heightRatio < 0.012) ? 8 : 0;
   const slenderPenalty = (m.widthRatio < 0.10 && m.heightRatio > 0.12) ? 5 : 0;
-  /* hugePenalty: 영역이 페이지를 통째로 삼키는 over-grab 방지. 단 up 방향이고 bodyStops=0이며
-     (farClosed || !raster)일 때 면제한다(v2.12.0) — 본문을 문 흔적 없는 진짜 전면 figure(Nature
-     Extended Data류)는 far 경계가 닫혔거나(farClosed) 벡터로 영역을 채운다(raster=0). 반면
-     `!farClosed && raster`는 경계가 안 닫힌(ink가 far 경계까지 이어지는) 영역 안에 raster figure가
-     든 형태 = raster 너머로 over-reach한 것이라 벌점 유지(Simões 4@6 회귀 방지). over-grab은
-     본문을 삼켜 bodyStops>0이므로 여전히 벌점, side 후보도 무변경(full-height 보호 유지). */
-  const hugeExempt = m.direction === "up" && m.bodyStops === 0 && (m.farClosed || !m.raster);
+  /* hugePenalty: 영역이 페이지를 통째로 삼키는 over-grab 방지. 단 up 방향이고 아래 중 하나면 면제:
+     ① 수평 잉크 커버리지 ≥ HUGE_COVERAGE_MIN **그리고** widthRatio ≥ HUGE_WIDTH_MIN (v2.13.0 커버리지 +
+        v2.13.1 폭 바닥) — 잉크 90% 질량이 영역 폭 대부분에 퍼지고 영역 자체가 페이지 폭의 60%↑인 진짜
+        전폭 figure. `!farClosed && raster`라 v2.12.0 프록시가 못 잡던 Nature 2026 전폭 clip 11건 해소.
+        폭 바닥은 coverage가 후보 자기 폭 기준 밀도라 좁고 긴 후보(hugeCond가 heightRatio 단독 발동)를
+        면제하는 사각을 막는다(Blockchain 2@36 widthRatio 0.47). ② farClosed 또는 !raster (v2.12.0 프록시 —
+        far 경계 닫힘/벡터충전 전면 figure — 폭 무관).
+     coverage 판별자는 over-grab(칼럼 figure를 전폭으로 잡아 한쪽이 빈 영역)을 커버리지 낮음으로
+     걸러 벌점 유지 → Simões 4@6·Pandey 3@6 칼럼폭 over-grab 회귀 방지. 프록시에 OR로 보강한
+     것이라 v2.12.0에서 면제되던 figure는 커버리지와 무관하게 계속 면제(회귀 0 보장). side 후보는
+     무변경(full-height 보호 유지). coverage는 huge 조건일 때만 산출되며 그 외엔 0(면제 판정에 무영향).
+     ※ up 스캔은 body 블록을 제외하고 stop하므로 up 영역은 body를 구조적으로 포함하지 않는다. */
+  const hugeExempt = m.direction === "up" &&
+    ((m.coverage >= HUGE_COVERAGE_MIN && m.widthRatio >= HUGE_WIDTH_MIN) || m.farClosed || !m.raster);
   const hugePenalty = (!hugeExempt && (m.areaRatio > 0.65 || m.heightRatio > 0.82)) ? 8 : 0;
   const otherCapPenalty = m.stopReason === "other-cap" ? 0.5 : 0;
   const total = area + width + height + density + proximity + boundary + raster
@@ -972,6 +1006,39 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
           ink += inkAt(grid, xx, yy); samples++;
         }
       }
+      /* ── 수평 잉크 커버리지 (v2.13.0) ─────────────────────────────────────────
+         up 후보 영역에서 잉크 질량의 90%를 담는 최소 연속 컬럼 폭 / 영역 폭 = coverage.
+         진짜 전폭 figure는 잉크가 폭 전반에 퍼져 coverage↑(내부 패널 갭에 강건),
+         over-grab(칼럼 figure를 전폭으로 잡음)은 잉크가 좁게 뭉쳐 coverage↓ + 가장자리 빈 여백.
+         hugePenalty 면제 판별에만 쓰이므로 huge 조건(area>0.65‖h>0.82)일 때만 계산.
+         covOcc(점유 컬럼 비율)·prof(24-bin 프로파일)는 진단 로그용. */
+      const heightRatio0 = h / grid.H, areaRatio0 = (w * h) / (grid.W * grid.H);
+      const hugeCond0 = areaRatio0 > 0.65 || heightRatio0 > 0.82;
+      let coverage = 0, covOcc = 0;
+      if (dir === "up" && hugeCond0 && sx1 > sx0 && sy1 >= sy0) {
+        const cw = sx1 - sx0 + 1;
+        const colCnt = new Uint32Array(cw);
+        let rowsSampled = 0, total = 0;
+        for (let yy = sy0; yy <= sy1; yy += step) {
+          rowsSampled++;
+          for (let xx = sx0; xx <= sx1; xx++)
+            if (inkAt(grid, xx, yy)) { colCnt[xx - sx0]++; total++; }
+        }
+        if (total > 0) {
+          /* 잉크 질량 90%를 담는 최소 연속 컬럼 창(슬라이딩 윈도우) / 영역 폭 = coverage */
+          const need = 0.90 * total;
+          let bestW = cw, lo = 0, acc = 0;
+          for (let hi = 0; hi < cw; hi++) {
+            acc += colCnt[hi];
+            while (acc - colCnt[lo] >= need) { acc -= colCnt[lo]; lo++; }
+            if (acc >= need && hi - lo + 1 < bestW) bestW = hi - lo + 1;
+          }
+          coverage = bestW / cw;
+          const FILL = 0.12 * Math.max(1, rowsSampled);   // covOcc: 점유 컬럼 비율 (진단 로그용)
+          let occ = 0; for (let i = 0; i < cw; i++) if (colCnt[i] >= FILL) occ++;
+          covOcc = occ / cw;
+        }
+      }
       let geometricGapPt;
       if (dir === "up") geometricGapPt = Math.max(0, cap.top * S - ry1) / S;
       else if (dir === "down") geometricGapPt = Math.max(0, ry0 - capBottom * S) / S;
@@ -993,7 +1060,8 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         farClosed: farBlankPx >= Math.round(4.8 * S),
         raster,
         stopReason,
-        direction: dir
+        direction: dir,
+        coverage, covOcc
       };
     };
     const scoreText = (dir, candidate) => {
@@ -1008,7 +1076,8 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         ` terms=${s.area.toFixed(2)}/${s.width.toFixed(2)}/${s.height.toFixed(2)}/` +
         `${s.density.toFixed(2)}/${s.proximity.toFixed(2)}/${s.boundary.toFixed(2)}/${s.raster.toFixed(2)}` +
         ` penalties=${s.bodyPenalty.toFixed(2)}/${s.tinyPenalty.toFixed(2)}/` +
-        `${s.slenderPenalty.toFixed(2)}/${s.hugePenalty.toFixed(2)}/${s.otherCapPenalty.toFixed(2)}`;
+        `${s.slenderPenalty.toFixed(2)}/${s.hugePenalty.toFixed(2)}/${s.otherCapPenalty.toFixed(2)}` +
+        ` cov=${m.coverage.toFixed(2)} occ=${m.covOcc.toFixed(2)}`;
     };
 
     const downStart = Math.max(0, Math.round(capBottom * S) + 2);

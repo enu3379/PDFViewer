@@ -31,7 +31,24 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.13.1";
+const VERSION = "2.14.0";
+// 2.14.0: [계약 무변경] soft 캡션 문서 게이트 강건화 — 혼합-관습 문서에서 hard 앵커 1개가 같은 문서
+//        soft 캡션을 전량 몰살하던 문제 해결. 두 갈래. **Part1**: soft 게이트의 hard 카운트를 "sep-증거"로
+//        교정 — 구 hardCount(비-family 앵커를 sep·bare 무차별 1로 셈)를 hardBody = (비-family sep 앵커)
+//        + (반복 동형 bare, 같은 form ≥2)로 바꿔, 고립 bare 맨-라벨(캡션 라벨이 wrap돼 번호가 줄끝에 온
+//        Hao "Figure 7")을 hard 관습 증거에서 제외한다. bare form 집계는 문서-레벨·per-FORM·soft formCount와
+//        물리 분리(공유 시 고립 bare가 동형 soft와 합산돼 오분류). family(S·ED·A~D)는 sep/bare 분기 前 배제.
+//        **Part2**: hardBody 3-체제 라우터 — 0=전량승격(구 pass 경로)·1..K-1=애매역·≥K=전량기각(구 pass=0),
+//        K=2. 애매역(hard 관습 딱 1건: 본문 soft + 진짜 캡션/FP hard 1개를 분간 못 하는 경계)은 잠정승격 후
+//        pass2에서 up-점수 floor(SOFT_UP_FLOOR=8.5) 검증 → 미달·무-fig 앵커 강등 → detectPage 재실행으로
+//        이웃 오염(other-cap stop·sibling-clamp) 복구. 재실행 후 재-floor(bounded loop) — 앵커 제거가
+//        up-점수에 비단조(hugePenalty)라 "1회 고정"이 근거 없어 fixpoint까지 반복. 강등 0이면 재실행 없이
+//        전량승격과 byte-identical. up-점수는 chosen이 아니라 **up 후보 점수**를 읽는다(floor 정의 준수).
+//        복구: bench 3편 15 not_detected critical (Hao 8[전량승격]·s10854 4·s11269 3[애매역]). Rivaroxaban
+//        Fig1(caption_next_page, 캡션페이지 얇은 스트립 up=7.90<8.5)은 정답 기각 유지. 정상기각 4편
+//        (acm·Balci·Vaquero·wiley, hardBody≥4)·전량승격 원산지(Robertson·Fauzi·Kim·PAH) 무변경. 전수 diff로
+//        hard 문서 비국소 회귀 0 확인. 설계는 3 Fable subagent 적대검증 + 4-critic 패널 확정(EVAL 규칙 유래 표).
+//        출력 필드·좌표계·(num,page) 키·manifest 스키마 불변. ⚠ 반복-bare include 분기는 코퍼스 witness 0.
 // 2.13.1: [계약 무변경] hugeExempt 커버리지 면제에 widthRatio ≥ HUGE_WIDTH_MIN(0.60) 폭 바닥 가드 추가.
 //        coverage(=잉크 90% 질량 최소폭 ÷ 후보 폭)는 후보 '자기 폭' 기준 밀도라, hugeCond가 heightRatio>0.82
 //        단독으로 발동하는 좁고 긴 raster 후보(자기 폭 안 잉크 조밀 → coverage↑)도 면제되는 사각이 있었다
@@ -186,8 +203,22 @@ const SOFT_BODY_RE2 = /^(?:[a-z](?:[–—-][a-z])*)?[A-Z(\[“‘"•]/;
 /* 공백 제거 경로는 자간 분리 라벨(Wiley "F I G U R E")에만 허용 — 무제한 허용하면
  * "Figure 2B is a composite" 류가 어절 경계 소실로 통과한다. */
 const SOFT_SPACED_RE = /^(?:[A-Za-z]\s){3,}/;
-const SOFT_DOC_HARD_MAX = 0;   // 문서의 hard 앵커 총수 상한 (초과 시 soft 전량 기각)
 const SOFT_FORM_MIN     = 2;   // 같은 라벨폼이 문서 내 반복돼야 하는 최소 횟수
+/* soft 문서 게이트 라우터 (v2.14.0) — hardBody(= 본문 figure hard 관습 증거) 기준 3-체제:
+ *   hardBody == 0            → 전량승격 (구 SOFT_DOC_HARD_MAX=0 경로)
+ *   1 .. SOFT_GATE_K-1       → 애매역 (잠정승격 → up-점수 floor 검증 → 강등 → 재실행 fixpoint)
+ *   >= SOFT_GATE_K           → 전량기각
+ * hardBody = 비-family sep 앵커 수 + 반복 동형 bare(같은 form ≥2) 수. 고립 bare(맨-라벨 wrap 잔재)는 제외.
+ * ★ k=2 근거 = "빈·미검증 {2,3} 밴드에 대한 애매역 최소 노출(보수)". 현 코퍼스 hardBody 분포는
+ *   0(다수)·1{Rivaroxaban·s10854·s11269}·4(Balci)·8(wiley)·9(Vaquero)·17(acm)로 {2,3}이 공집합이라
+ *   k∈{2,3,4}는 회귀-동등하다. UP_FLOOR가 regime을 대체하지 못한다는 핵심 통찰은 k≥5에서 성립한다
+ *   (그때 Balci 본문상호참조 phantom up=10.86 > 8.5로 floor를 뚫는다) — 그래서 k를 키우지 않는다. */
+const SOFT_GATE_K   = 2;
+/* 애매역 잠정승격 soft 앵커의 최소 up-점수. healthy 바(8.0, minScore)보다 엄격하게 둔다 —
+ * 애매역 phantom(Rivaroxaban 캡션페이지 얇은 스트립 up=7.90)과 진짜 soft 캡션(전수 프로브 최저 9.57)
+ * 사이 gap(7.90 … 9.57)의 중앙. 8.0 재사용은 phantom margin 0.10으로 batch 비결정성에 취약해 불가.
+ * ⚠ 3편(reject 1 phantom + target 2 recover) 실측 기반 잠정치 — 애매역 hardBody==1 문서가 늘면 재교정. */
+const SOFT_UP_FLOOR = 8.5;
 /* ---- table 캡션 (v2.10.0): 방출하지 않고 경계로만 쓴다. isCaption과 동일한 번호·구분자 문법의 table
  * 버전 — 단 대문자 Table/TABLE만 허용해 본문 "table 3. With ..." 소문자 오탐을 배제한다. 무구분자
  * "TABLE N <제목>"(Frontiers/Springer soft 표기)은 미지원(후속 — 문서 게이트 필요, figure v2.9.1과 동형). ---- */
@@ -512,37 +543,74 @@ function captionAnchors(lines, dbg) {
   }
   /* slots(희소 배열)를 노출하는 이유: 승격 시 slots[index] 기입 후 filter(Boolean) 재실행만으로
    * 라인 순서가 보존된다 — anchors 순서는 detectPage의 밴드 한계·otherCaps가 소비하므로 결정적이어야 한다. */
-  /* hardCount = soft 문서 게이트용 hard 앵커 총수 (v2.11.0 ★: 보충/부록 계열 제외). 본문 figure가 soft
-   * 표기이고 보충이 "Fig. S1."인 문서에서 S 앵커가 게이트(hard=0)를 깨면 soft 앵커 4편이 전멸한다 —
-   * 게이트의 질문은 "이 문서가 본문 figure에 hard 관습을 쓰나"이므로 별개 번호계열(S·ED·A~D)은 세지 않는다. */
-  const countHardBody = ln => { const info = infoByAnchor.get(ln); return info && !isFamilyNum(info.num) ? 1 : 0; };
+  /* soft 문서 게이트용 hard 관습 증거 (v2.14.0 — 구 hardCount 대체). "이 문서가 본문 figure에 hard
+   * 구분자 관습을 쓰나"를 sep-증거로 센다. 세 갈래로 분리(★순서 불변: family 배제를 sep/bare 분기 前에):
+   *   family(S·ED·A~D, isFamilyNum:282) → 무시 (별개 번호계열, v2.11.0 유래).
+   *   비-family sep 앵커(. : | 있음, info.hard=true) → hardSep 카운트 (진짜 hard 관습 증거).
+   *   비-family bare 앵커(구분자 없는 맨-라벨, info.hard=false) → form만 모아 bareForms로 노출.
+   *     문서-레벨 반복 판정(같은 form ≥2 = 관습)은 promoteSoftAnchors가 전 페이지 합산으로 한다 —
+   *     페이지별로 세면 s11427식 페이지-산개 7/7 맨-라벨이 각 페이지 count=1로 고립 오판된다.
+   *   ⚠ bareForms는 bare 전용 multiset이다 — softSlots.form(승격 formCount)과 물리적으로 분리한다.
+   *     고립 bare "Figure 7"(Hao)의 form이 soft 8앵커 form과 같은 키라 공유 맵이면 반복 오분류된다. */
+  const bareFormOf = ln => {
+    const s = (ln.s || "").replace(/\s+/g, " ").trim();
+    return /^figure\b/i.test(s) ? "figure" : (/^fig\b|^fig\.?\d/i.test(s) ? "fig" : "spaced");
+  };
+  const bareForms = [];
+  let hardSep = 0;
+  const tally = info => {
+    if (!info || isFamilyNum(info.num)) return;   // family는 sep/bare 분기 前 배제
+    if (info.hard) hardSep++;                       // 구분자 있는 비-family = hard 관습 증거
+  };
+  const tallyBare = (info, ln) => {
+    if (!info || isFamilyNum(info.num) || info.hard) return;
+    bareForms.push(bareFormOf(ln));                 // 구분자 없는 비-family 맨-라벨의 form
+  };
+  for (const ln of slots.filter(Boolean)) { const info = infoByAnchor.get(ln); tally(info); tallyBare(info, ln); }
+  for (const arr of embedded.values()) for (const a of arr) { const info = infoByAnchor.get(a); tally(info); tallyBare(info, a); }
   return { anchors: assembleAnchors(slots, embedded), ownerByPart, infoByAnchor,
-           slots, embedded, softSlots,
-           hardCount: slots.filter(Boolean).reduce((n, ln) => n + countHardBody(ln), 0) +
-             [...embedded.values()].reduce((n, arr) => n + arr.reduce((k, a) => k + countHardBody(a), 0), 0) };
+           slots, embedded, softSlots, hardSep, bareForms };
 }
 
-/* 1차 패스 종료 후 문서 전체를 보고 soft 앵커 승격 여부를 결정한다 (v2.9.1).
- * 게이트: ① 문서 hard 앵커 총수 <= SOFT_DOC_HARD_MAX ② 같은 라벨폼이 SOFT_FORM_MIN회 이상.
- * 근거: 한 문서는 보통 캡션 표기 관습을 하나만 쓴다 — hard 앵커가 이미 나오는 문서의 soft 후보는
- * 거의 전부 본문 상호참조이고, hard 앵커가 없는 문서의 그것은 거의 전부 진짜 캡션이다(코퍼스 실측).
- * 승격된 앵커는 hard:false·parts 1개로 기존의 "구분자 없는 앵커"와 구조적으로 동일하므로
- * detectPage의 후보 생성·채점·선택 경로는 한 줄도 바뀌지 않는다. */
+/* 1차 패스 종료 후 문서 전체를 보고 soft 앵커 승격 여부를 결정한다 (v2.9.1 · v2.14.0 라우터).
+ * hardBody(= 본문 figure hard 관습 증거 = 비-family sep 앵커 + 반복 동형 bare)로 3-체제 라우팅:
+ *   0 → 전량승격 / 1..K-1 → 애매역(잠정승격, pass2 floor 검증) / >=K → 전량기각.
+ * 근거: 한 문서는 보통 캡션 표기 관습을 하나만 쓴다 — hard 관습이 이미 있는 문서의 soft 후보는 거의
+ * 전부 본문 상호참조, hard 관습이 없는 문서의 그것은 거의 전부 진짜 캡션(코퍼스 실측). 애매역은
+ * "hard 관습이 딱 1건뿐"이라 혼합-관습(본문 soft + 진짜 캡션 hard 1개 or FP hard 1개)을 분간 못 하는
+ * 경계 — 잠정승격 후 up-점수 floor로 진짜 캡션만 남긴다(구 게이트는 이 문서들의 soft를 전멸시켰다).
+ * 승격 앵커는 hard:false·parts 1개로 기존 "구분자 없는 앵커"와 구조적으로 동일 → 후보 생성·채점·선택
+ * 경로 불변. 애매역 앵커만 provisional:true로 표시해 pass2의 floor 검증 대상이 됨. */
 function promoteSoftAnchors(pageData, dbg) {
-  let hardTotal = 0, softTotal = 0;
-  const formCount = new Map();
+  let hardSepTotal = 0, softTotal = 0;
+  const formCount = new Map();       // soft 라벨폼 (승격 form-rep 판정) — bare와 분리
+  const bareFormCount = new Map();   // ★ bare 전용 multiset (문서-레벨 반복 판정, formCount와 disjoint)
   for (const pd of pageData) {
-    hardTotal += pd.captionData.hardCount;
+    hardSepTotal += pd.captionData.hardSep;
+    for (const f of pd.captionData.bareForms) bareFormCount.set(f, (bareFormCount.get(f) || 0) + 1);
     for (const c of pd.captionData.softSlots) {
       softTotal++;
       formCount.set(c.form, (formCount.get(c.form) || 0) + 1);
     }
   }
-  if (!softTotal) return;
+  if (!softTotal) return;   // soft 후보 없으면 hardSep/bareForms 미소비 — 무영향(무-soft 문서 불변)
+  /* 반복 동형 bare(같은 form ≥2)만 hard 관습으로 카운트 — 고립 bare(Hao wrap 잔재 "Figure 7")는 제외.
+   * per-FORM 집계(문서 총 bare 수 아님): 서로 다른 form 고립 bare 2개는 관습이 아니다. */
+  let bareRep = 0;
+  for (const [, n] of bareFormCount) if (n >= SOFT_FORM_MIN) bareRep += n;
+  const hardBody = hardSepTotal + bareRep;
   const forms = [...formCount].map(([f, n]) => `${f}:${n}`).join(",");
-  const gateOk = hardTotal <= SOFT_DOC_HARD_MAX;
-  dbg(`[doc] SOFT gate hard=${hardTotal} soft=${softTotal} forms=${forms} pass=${gateOk ? 1 : 0}`);
-  if (!gateOk) return;
+  const bareInfo = [...bareFormCount].map(([f, n]) => `${f}:${n}`).join(",") || "-";
+  const regime = hardBody === 0 ? "promote-all"
+               : hardBody < SOFT_GATE_K ? "ambiguous" : "reject-all";
+  dbg(`[doc] SOFT gate hardBody=${hardBody} (sep=${hardSepTotal} bareRep=${bareRep} bare=[${bareInfo}])` +
+      ` soft=${softTotal} forms=${forms} regime=${regime}`);
+  /* {2,3} 저-hardBody 기각은 현 코퍼스 공witness(공집합) — 혼합-관습 soft 문서가 여기 걸리면 침묵
+   * 표적 손실이다. 전수 diff에서 표면화되도록 NOTE 방출(현재 미발동, 미래 대비 계측). */
+  if (regime === "reject-all" && hardBody <= 3)
+    dbg(`[doc] SOFT gate NOTE reject-all with low hardBody=${hardBody} — verify not a soft-target doc`);
+  if (regime === "reject-all") return;
+  const provisional = regime === "ambiguous";
 
   for (const pd of pageData) {
     const cd = pd.captionData;
@@ -560,12 +628,13 @@ function promoteSoftAnchors(pageData, dbg) {
         hard: false,      // 구분자가 없으므로 hard 문법이 아니다 (hardLong 경로 비진입)
         stitched: false,
         soft: true,
+        provisional,      // 애매역이면 pass2 floor 검증 대상 (전량승격은 false — 검증 없이 확정)
         form: c.form,
         parts: [c.line],
         labelBox: { left: c.line.left, w: c.line.w, top: c.line.top, h: c.line.h }
       });
       promoted++;
-      dbg(`[doc] SOFT promote p${pd.num} num=${c.num} form=${c.form}` +
+      dbg(`[doc] SOFT ${provisional ? "provisional" : "promote"} p${pd.num} num=${c.num} form=${c.form}` +
           ` s=${JSON.stringify(c.line.s.slice(0, 50))}`);
     }
     if (promoted) cd.anchors = assembleAnchors(cd.slots, cd.embedded);   // 라인 순서 보존 재구성
@@ -779,6 +848,8 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     dbg(`  tables=${tableStop.size} ${[...tableStop].slice(0, 4).map(u => JSON.stringify(u.s.slice(0, 22))).join(" ")}`);
   for (const cap of caps) {
     const capInfo = infoByAnchor.get(cap);
+    capInfo.upScore_ = undefined;   // 매 앵커 초기화 (v2.14.0) — legacyBelow continue가 아래 갱신을 건너뛰어도
+                                    // 이전 detectPage 재실행의 값이 남지 않게 (soft floor 판정 오염 방지)
     const num = capInfo.num;
     if (capInfo.stitched) {
       const lb = capInfo.labelBox;
@@ -2003,6 +2074,7 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       dbg(scoreText("up", upCandidate));
       dbg(`  Fig${num}: SCORE down legacy-image`);
       dbg(`  Fig${num}: CHOSE down legacy-image`);
+      legacyBelowCandidate._anchor = cap;   // soft floor 판정이 이 앵커의 자기 fig를 식별 (v2.14.0)
       figs.push(legacyBelowCandidate);
       continue;
     }
@@ -2052,6 +2124,12 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     suppressDominatedImageTail(leftCandidates);
     suppressDominatedImageTail(rightCandidates);
     const alternatives = [...downCandidates, ...leftCandidates, ...rightCandidates];
+    /* soft 애매역 floor 검증용 up-점수 노출 (v2.14.0) — ★ chosen 후보 점수가 아니라 up 후보 점수다.
+     * floor 정의가 "up-score < FLOOR"이므로 chose가 down/side여도 up 점수를 봐야 한다. up 후보가
+     * 없으면(캡션-위 legacyBelow 등) undefined로 남겨 pass2가 "fig 있으면 유지"(진짜 캡션-위 도형
+     * false-negative 방지)로 분기한다. 비-soft 앵커도 기입되나 읽히지 않아 무해(출력 미포함). */
+    capInfo.upScore_ = upCandidate && Number.isFinite(upCandidate.score.total)
+      ? upCandidate.score.total : undefined;
     dbg(scoreText("up", upCandidate));
     if (!downCandidates.length) dbg(scoreText("down", null));
     else downCandidates.forEach((candidate, i) =>
@@ -2088,7 +2166,7 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     dbg(`  Fig${num}: CHOSE ${chose} margin=${decision.margin.toFixed(1)}` +
       ` minAlt=${policy.minScore.toFixed(1)} delta=${delta}` +
       ` seed=${chosen && chosen.seedSource ? chosen.seedSource : "-"}`);
-    if (chosen) { chosen.fig.dir_ = chose; figs.push(chosen.fig); }
+    if (chosen) { chosen.fig.dir_ = chose; chosen.fig._anchor = cap; figs.push(chosen.fig); }
   }
   /* offset side-by-side 컬럼 분리 (v2.10.2) — 같은 baseline 형제는 위 per-candidate clamp(v2.10.1)가
    * 이미 처리한다. 여기서는 baseline이 어긋난 나란한 형제(키 큰/작은 이웃 — Dong Fig4는 Fig3보다
@@ -2118,6 +2196,51 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         if (F.x0 < gCapR * S) F.x0 = Math.max(F.x0, Math.round((fCapL - SIBLING_COL_MARGIN) * S) - 10);
       }
     }
+  }
+  return figs;
+}
+
+/* soft 애매역(promoteSoftAnchors regime=ambiguous) floor 검증 래퍼 (v2.14.0).
+ * detectPage를 돌린 뒤, provisional soft 앵커 중 up-점수 < SOFT_UP_FLOOR(또는 아무 fig도 못 낸 것)를
+ * 강등하고 detectPage를 재실행한다 — 강등된 phantom 앵커가 이웃(other-cap stop·sibling-clamp)에 남긴
+ * 오염을 재실행이 복구한다. **재실행 후 재-floor 검사(bounded loop)**: 앵커 제거는 up-점수에 비단조다
+ * (경쟁 앵커가 사라지면 up 영역이 위로 커져 hugePenalty(-8)를 맞고 점수가 되레 떨어질 수 있다,
+ * figureScore hugePenalty vs otherCapPenalty 0.5). 단조성 가정이 깨지므로 "1회 고정"이 아니라, 새로
+ * floor 아래로 내려간 survivor도 강등하며 앵커 수 상한까지 반복해 fixpoint에 수렴시킨다.
+ * 강등 0이면 재실행 없음 → 전량승격·전량기각 문서와 byte-identical(provisional 앵커가 없으므로).
+ * ★ 강등 되돌림은 승격의 완전 역연산 + assembleAnchors 재조립(promoteSoftAnchors 미러) — 누락 시
+ *   stale anchors가 강등 라인을 물고 있어 재실행이 오염 상태를 본다. */
+function detectPageWithFloor(pd, dom, grid, dbg) {
+  const cd = pd.captionData;
+  const provisionalSoft = () => cd.softSlots.filter(c => {
+    const info = cd.infoByAnchor.get(c.line);
+    return info && info.soft && info.provisional;
+  });
+  let figs = detectPage(pd, pd.lines, dom, grid, dbg, cd);
+  if (!provisionalSoft().length) return figs;             // 애매역 아님 → 단일 실행(현행 경로)
+  const bound = cd.softSlots.length + 1;                  // 매 회 ≥1 강등 → 앵커 수 상한서 종료
+  for (let pass = 0; pass < bound; pass++) {
+    const demote = [];
+    for (const c of provisionalSoft()) {
+      const info = cd.infoByAnchor.get(c.line);
+      const up = info.upScore_;                            // up 후보 점수 (undefined=up 후보 없음)
+      // ★ 이 앵커가 낸 자기 fig를 _anchor로 식별한다 (num으로 찾으면 같은 페이지 동일 num의 다른
+      //   앵커 fig를 오귀속해 phantom을 못 걸러낸다 — 적대검증 Finding 1).
+      const fig = figs.find(f => f._anchor === c.line);
+      // up 후보 있으면 floor로 판정. 없으면(캡션-위 legacyBelow 등) 자기 fig 존재 시 유지(진짜 도형 보호).
+      const keep = up === undefined ? !!fig : up >= SOFT_UP_FLOOR;
+      if (!keep) demote.push({ c, up, hasFig: !!fig });
+    }
+    if (!demote.length) break;
+    for (const { c, up, hasFig } of demote) {
+      cd.slots[c.index] = undefined;                       // 승격 역연산 (희소 배열 구멍)
+      cd.ownerByPart.delete(c.line);
+      cd.infoByAnchor.delete(c.line);
+      dbg(`  [floor] DEMOTE p${pd.num} num=${c.num} up=${up === undefined ? "-" : up.toFixed(2)}` +
+          ` fig=${hasFig ? 1 : 0} < ${SOFT_UP_FLOOR}`);
+    }
+    cd.anchors = assembleAnchors(cd.slots, cd.embedded);   // ★ 재조립 필수 (line ~604 미러)
+    figs = detectPage(pd, pd.lines, dom, grid, dbg, cd);   // 이웃 오염 복구 재실행
   }
   return figs;
 }
@@ -2195,7 +2318,7 @@ async function extract(data, opts = {}) {
       }
     }
     const grid = makeInk(canvas);
-    const figs = detectPage(pd, pd.lines, dom, grid, dbg, pd.captionData);
+    const figs = detectPageWithFloor(pd, dom, grid, dbg);
     /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
      * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 경쟁은 같은 페이지 안에서만 발생하므로
      * dedup·최소 크기 필터를 페이지 단위로 끝내고, 살아남은 figure만 즉시 크롭해 보관한다.
@@ -2223,6 +2346,7 @@ async function extract(data, opts = {}) {
     delete f.captionBox;
     delete f.raster_;
     delete f.dir_;
+    delete f._anchor;   // soft floor 판정용 내부 태그 — 출력 미포함 (v2.14.0)
     f.confidence = 1.0; // 당분간 고정 (Margin FigureEntry.confidence 대응)
   }
   /* 후처리: 번호 공백 추론 — 감지된 정수 번호 1..최대 중 빠진 번호 = 미탐지 의심.

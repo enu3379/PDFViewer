@@ -240,7 +240,6 @@ async function initializeDoc(titleFallback: string, url?: string): Promise<void>
   buildRenderedPageIndexes();
   syncAnnotationViews();
   repairRenderedPages();
-  figuresTab.setDocument(host.pdfDocument);
 }
 
 function markTocForPage(page: number): void {
@@ -256,6 +255,7 @@ function markTocForPage(page: number): void {
 
 async function loadUrl(file: string): Promise<void> {
   setLoading(file);
+  figuresTab.setDocument(null);
   if (fileLabel) fileLabel.textContent = basenameFromUrl(file);
   const isLocalFile = isFileSchemeUrl(file);
   if (isLocalFile && !(await canReadFileSchemeUrls())) {
@@ -263,7 +263,8 @@ async function loadUrl(file: string): Promise<void> {
     return;
   }
   try {
-    await host.loadUrl(file);
+    const doc = await host.loadUrl(file);
+    figuresTab.setDocument(doc);
     await initializeDoc(basenameFromUrl(file), file);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(basenameFromUrl(file));
@@ -273,6 +274,7 @@ async function loadUrl(file: string): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    figuresTab.setDocument(null);
     if (isLocalFile && isMissingPdfError(error)) {
       showMissingFileState(file);
       return;
@@ -283,9 +285,11 @@ async function loadUrl(file: string): Promise<void> {
 
 async function loadSelectedFile(file: File): Promise<void> {
   setLoading(file.name);
+  figuresTab.setDocument(null);
   if (fileLabel) fileLabel.textContent = file.name;
   try {
-    await host.loadFile(file);
+    const doc = await host.loadFile(file);
+    figuresTab.setDocument(doc);
     await initializeDoc(file.name);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(file.name);
@@ -295,6 +299,7 @@ async function loadSelectedFile(file: File): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    figuresTab.setDocument(null);
     setError(error);
   }
 }

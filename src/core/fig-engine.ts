@@ -29,24 +29,33 @@ export interface EngineFigure {
   bboxPt: EngineBox;            // 그림 영역만 — 캡션 제외
   captionBoxPt: EngineBox;      // 캡션 블록 영역
   bboxPx: EngineBox;            // 분석 렌더 픽셀 (pt × 2.2)
-  canvas: HTMLCanvasElement;    // 해당 페이지 전체 렌더 (scale 2.2)
+  cropCanvas: HTMLCanvasElement; // v2.5.1+: 그림 영역만의 크롭 렌더 (scale 2.2). 엔진은 페이지 전체
+                                // 캔버스를 보관하지 않는다 (#12). 프리뷰 생성 후 참조를 버리면 GC 회수
 }
+// v2.5.0: figure 식별 키 = (num, page). 같은 num이 다른 페이지에 복수 등장 가능
+// (합본 논문·부록 번호 재시작 — #14). num 단독을 키로 쓰지 말 것 (toFigureEntries의
+// `fig{num}-p{page}` ID가 올바른 형태).
 
 export interface EngineResult {
   title: string | null;         // PDF 메타데이터 Title
   numPages: number;
   engineVersion: string;
-  figures: EngineFigure[];
+  figures: EngineFigure[];      // 정렬: page 오름차순 → num 자연순 (결정적)
+  /** v2.4.0+: 감지된 정수 번호 1..최대 중 빠진 번호 (미탐지 의심) — 무시해도 됨 */
+  suspectedMissing: string[];
 }
 
 export interface ExtractOptions {
   onProgress?: (msg: string) => void;
   debug?: (msg: string) => void;
-  maxPages?: number;            // 기본 60
+  maxPages?: number;            // v2.5.1+: 스캔 페이지 상한 (미지정 시 전체 페이지)
   /** 이미 로드된 문서 재사용 (지정 시 data는 null 가능) */
   pdfDocument?: PDFDocumentProxy;
   /** 호스트의 페이지 렌더 캐시 주입 (미지정 시 엔진이 자체 렌더) */
   renderPage?: (pageNum: number, scale: number) => Promise<HTMLCanvasElement>;
+  /** v2.5.0+: 협조 취소 — 페이지 단위 체크, abort 시 AbortError로 reject (#12 문서 교체 대응).
+   *  v2.5.1+: abort 시 진행 중 페이지 렌더도 RenderTask.cancel()로 즉시 중단 */
+  signal?: AbortSignal;
 }
 
 export interface FigExtractApi {
@@ -57,8 +66,19 @@ export interface FigExtractApi {
   cropBlob(fig: EngineFigure): Promise<Blob>;
 }
 
-export const FigExtract: FigExtractApi =
-  (globalThis as unknown as { FigExtract: FigExtractApi }).FigExtract;
+export function requireFigExtract(scope: { FigExtract?: FigExtractApi }): FigExtractApi {
+  const api = scope.FigExtract;
+  if (!api) {
+    throw new Error(
+      'FigExtract가 전역에 등록되지 않았습니다. "./fig-extract.js" side-effect import가 실행되었는지 확인하세요.'
+    );
+  }
+  return api;
+}
+
+export const FigExtract = requireFigExtract(
+  globalThis as unknown as { FigExtract?: FigExtractApi }
+);
 
 /**
  * 엔진 좌표(pt, 좌상단 원점) → PDF user space PdfRect [x1, y1, x2, y2] (좌하단 원점).

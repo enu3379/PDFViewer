@@ -225,8 +225,11 @@ onMouseUp:
 > figure 캡션·영역 감지는 별도 저장소(figure-preview-test)에서 개발·검증되는
 > **fig-extract 엔진**(`core/fig-extract.js`, vendored)이 담당한다. 
 
-- 사용: `core/fig-engine.ts`의 `FigExtract.extract()` → `toFigureEntries()`로 `FigureEntry` 생성.
-  좌표 변환(`toPdfRect`, 엔진의 좌상단 원점 pt → PDF user space) 포함.
+- 사용: `core/fig-engine.ts`의 `FigExtract.extract()` → `toFigureEntries()`로 `FigureSeed[]` 생성 후,
+  호출 측에서 `doc`과 `captionAnchor`를 채워 `FigureEntry`를 완성한다. 좌표 변환(`toPdfRect`, 엔진의
+  좌상단 원점 pt → PDF user space)은 `toFigureEntries()`가 담당한다.
+- 시작 시점: Margin 뷰어가 `PDFDocumentProxy`를 확보하는 즉시 엔진 스캔을 시작한다. 그림·표 탭 오픈은
+  결과 표시 또는 진행 상태 확인만 담당한다.
 - **문서 내 figure 목록(존재·번호·region·captionText)의 단일 진실 공급원은 엔진이다.**
 - `captionAnchor`는 엔진이 반환한 `captionText`를 해당 페이지 `S_p`에서 검색해 Margin 측이 채운다.
 - 엔진 미감지(figures에 없음) 또는 region 이상 시의 안전망은 §6 수동 크롭 그대로.
@@ -239,7 +242,7 @@ onMouseUp:
 
 - ref 정규식: `/\b(Fig(?:ure)?s?|Tab(?:le)?s?)\.?\s*(\d+[a-zA-Z]?)/g` — 각 매치를 `(kind, num)`으로 정규화해 FigureEntry에 매핑. 매핑 안 되는 번호는 무시. "Figures 2 and 3"은 첫 숫자만(문서화된 v1 제한).
 - 캡션 자신: 매치 구간이 그 figure의 `captionAnchor` 범위 안이면 **mentions 목록에서 제외**하되, 라벨 토큰은 클릭 가능하게 링크화한다(R6, `data-cap="1"` 부여).
-- 전체 문서 스캔: 그림·표 탭 최초 오픈 시 백그라운드로 1페이지부터 순차 `getTextContent`(이미 캐시된 페이지는 재사용, 페이지당 idle 처리) → `{figId, page, start, end}[]` 완성 후 목록 갱신. 진행 중에는 "스캔 중 n/N" 표시. 결과는 세션 메모리 캐시.
+- 본문 멘션 전체 문서 스캔: FigureEntry가 준비된 뒤 백그라운드로 1페이지부터 순차 `getTextContent`(이미 캐시된 페이지는 재사용, 페이지당 idle 처리) → `{figId, page, start, end}[]` 완성 후 목록 갱신. 진행 중에는 "스캔 중 n/N" 표시. 결과는 세션 메모리 캐시.
 - 링크 DOM 주입: `textlayerrendered`마다 해당 페이지 매치들에 대해 span 내부 텍스트 노드를 Range로 잘라 `<a class="mgn-ref" data-fig …>`로 감싼다(데모의 wrapRange와 동일 기법, span 경계에 걸치면 조각별로 감싼다). 이미 감싼 페이지는 `dataset.mgnRefs='1'`로 멱등 처리. 단일 span 내 매치만 처리(경계에 걸린 극소수는 v1 제한).
 - PDF 자체 하이퍼링크(hyperref) 연동: `PDFLinkService`를 서브클래스해 `goToDestination(dest)`를 오버라이드 — dest를 페이지·좌표로 해석했을 때 어떤 FigureEntry의 region/caption에 들어가면 점프 대신 패널 프리뷰를 연다(R1과 동일 동작). 그 외 dest는 원래 동작. annotation 링크와 우리 regex 링크가 같은 텍스트에 겹치면 annotation을 우선하고 regex 주입을 생략한다.
 

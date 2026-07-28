@@ -164,6 +164,57 @@ describe('PdfHost document lifecycle', () => {
     expect(destroyOf(first)).not.toHaveBeenCalled();
   });
 
+  it('flattens the outline of the current document', async () => {
+    const host = makeHost();
+    const doc = makeDoc('only');
+    Object.assign(doc, {
+      getOutline: async () => [
+        { title: 'Ch 1', dest: 'ch1', url: null, items: [{ title: 'Ch 1.1', dest: null, url: null }] }
+      ],
+      getDestination: async () => [{ num: 5, gen: 0 }],
+      getPageIndex: async () => 2
+    });
+    await load(host, doc);
+
+    const items = await host.getOutlineItems();
+    expect(items.map((item) => [item.title, item.depth, item.page])).toEqual([
+      ['Ch 1', 0, 3],
+      ['Ch 1.1', 1, null]
+    ]);
+  });
+
+  it('returns no outline instead of throwing when the read fails (#35)', async () => {
+    const host = makeHost();
+    const doc = makeDoc('only');
+    /* destroy된 문서의 getOutline은 AbortException으로 거절한다. 이게 새어나가면 **이전 로드의
+     * catch**로 흘러가 방금 열린 새 문서 위에 오류 화면을 띄운다 — 그래서 삼켜야 한다. */
+    Object.assign(doc, { getOutline: async () => { throw new Error('Worker was terminated.'); } });
+    await load(host, doc);
+
+    await expect(host.getOutlineItems()).resolves.toEqual([]);
+  });
+
+  it('discards an outline whose document was swapped out mid-read (#35)', async () => {
+    const host = makeHost();
+    let releaseOutline!: (nodes: unknown[]) => void;
+    const first = makeDoc('first');
+    Object.assign(first, {
+      getOutline: () => new Promise((resolve) => { releaseOutline = resolve as typeof releaseOutline; }),
+      getDestination: async () => [{ num: 1, gen: 0 }],
+      getPageIndex: async () => 0
+    });
+    const second = makeDoc('second');
+
+    await load(host, first);
+    const pending = host.getOutlineItems();
+    await load(host, second);                                   // 조회 중 문서 교체
+    releaseOutline([{ title: 'stale', dest: 'x', url: null }]);
+
+    /* 옛 문서의 목차로 새 문서의 TOC를 덮지 않는다 */
+    await expect(pending).resolves.toEqual([]);
+    expect(host.pdfDocument).toBe(second);
+  });
+
   it('does not destroy a document that is being re-set as the same instance (#35)', async () => {
     const host = makeHost();
     const doc = makeDoc('same');

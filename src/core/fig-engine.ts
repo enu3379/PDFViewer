@@ -13,6 +13,16 @@ import type { FigureEntry, PdfRect } from "./types";
 const globalScope = globalThis as Record<string, unknown>;
 if (!globalScope.pdfjsLib) globalScope.pdfjsLib = pdfjs;
 
+/**
+ * 벤더링된 `fig-extract.js`의 버전. **이 파일의 타입과 주석은 이 버전을 기준으로 쓰여 있다.**
+ *
+ * 엔진을 새로 벤더링하면 이 상수도 함께 올려야 하고, 그 시점에
+ * `docs/fig-extract-integration.md` §다음 벤더링 할 일을 처리해야 한다.
+ * `test/fig-engine.test.ts`가 불일치를 실패로 만들어 벤더링 PR이 스스로 알리게 한다 —
+ * 버전 스큐를 문서 문단이 아니라 테스트가 지키게 하려는 것이다.
+ */
+export const VENDORED_ENGINE_VERSION = '2.14.0';
+
 /** pt 단위, 좌상단 원점 사각형 (엔진 좌표계) */
 export interface EngineBox {
   x0: number;
@@ -29,8 +39,12 @@ export interface EngineFigure {
   bboxPt: EngineBox;            // 그림 영역만 — 캡션 제외
   captionBoxPt: EngineBox;      // 캡션 블록 영역
   bboxPx: EngineBox;            // 분석 렌더 픽셀 (pt × 2.2)
-  cropCanvas: HTMLCanvasElement; // v2.5.1+: 그림 영역만의 크롭 렌더 (scale 2.2). 엔진은 페이지 전체
-                                // 캔버스를 보관하지 않는다 (#12). 프리뷰 생성 후 참조를 버리면 GC 회수
+  // `cropCanvas` 필드는 엔진 v2.19.1이 제거했고([BREAKING]) 선언에서도 뺐다. 이미지는
+  // cropDataURL()/cropBlob()으로 받는다.
+  // ⚠ **현재 벤더링본은 v2.14.0이라 런타임에는 `cropCanvas`가 여전히 있고, `cropDataURL`은 그
+  //   필드를 읽는 순수 접근자다.** 즉 엔진이 준 figure 객체를 그대로 넘겨야 한다 — 선언된 필드만으로
+  //   재구성하거나 structuredClone/JSON 왕복을 거치면 타입은 통과하고 런타임에서 죽는다.
+  //   (v2.19.1을 벤더링하면 이 주의는 사라진다. docs/fig-extract-integration.md §벤더링본 v2.14.0)
 }
 // v2.5.0: figure 식별 키 = (num, page). 같은 num이 다른 페이지에 복수 등장 가능
 // (합본 논문·부록 번호 재시작 — #14). num 단독을 키로 쓰지 말 것 (toFigureEntries의
@@ -60,8 +74,13 @@ export interface ExtractOptions {
 
 export interface FigExtractApi {
   VERSION: string;
+  /** AbortError(취소) 외에 `name === 'FigRenderError'`로 reject될 수 있다 — 렌더 결과가 존재하지
+   *  않는 경우다(메모리 압력을 받은 Chrome이 캔버스 백킹 스토어를 회수). 조용히 빈 그림을 내놓는
+   *  대신 실패시킨다. 일시적 조건이므로 재시도가 유효하다 — FiguresTab의 "다시 시도" 경로가 적용된다.
+   *  ⚠ **엔진 v2.19.1+ 에서만 발생한다. 현재 벤더링본 v2.14.0은 이 오류를 던지지 않으므로,
+   *    지금 `e.name === 'FigRenderError'` 분기를 쓰면 죽은 코드다** — 같은 상황에서 v2.14.0은
+   *    오류 없이 백지 프리뷰를 낸다. 분기는 벤더링과 함께 넣을 것. */
   extract(data: Uint8Array | null, opts?: ExtractOptions): Promise<EngineResult>;
-  cropCanvas(fig: EngineFigure): HTMLCanvasElement;
   cropDataURL(fig: EngineFigure): string;
   cropBlob(fig: EngineFigure): Promise<Blob>;
 }

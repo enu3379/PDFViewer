@@ -147,7 +147,14 @@ let downloadName = 'document.pdf';
 async function downloadCurrentPdf(): Promise<void> {
   const doc = host.pdfDocument;
   if (!doc || downloadButton.disabled) return;
-  const data = await doc.getData();
+  /* 내려받는 도중 사용자가 다른 PDF를 열면 이 문서는 destroy된다 (#35) — getData가 거절하므로
+   * unhandled rejection이 되지 않게 삼킨다. 이미 사라진 문서라 재시도할 대상도 없다. */
+  let data: Awaited<ReturnType<typeof doc.getData>>;
+  try {
+    data = await doc.getData();
+  } catch {
+    return;
+  }
   // getData()의 Uint8Array<ArrayBufferLike>는 BlobPart와 타입이 안 맞아 ArrayBuffer 사본으로 감싼다.
   const blob = new Blob([new Uint8Array(data)], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
@@ -886,9 +893,10 @@ tocList.addEventListener('click', (event) => {
   if (!row) return;
   const item = outlineItems.find((candidate) => candidate.id === row.dataset.id);
   if (!item) return;
+  /* 이동 중 문서가 교체되면 getDestination이 거절한다 (#35) — 조용히 흘린다 */
   void host.jumpToOutline(item).then(() => {
     if (!pinned) closePanel();
-  });
+  }).catch(() => {});
 });
 
 const file = readFileParam();

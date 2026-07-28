@@ -115,9 +115,30 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
     진행 중 렌더의 `RenderTask.cancel()`에서만 멈춘다. 문서를 바꾼 뒤에도 나가는 스캔이 **약 1페이지
     분량**(페이지 캔버스 1장 + 그 페이지까지의 크롭)을 더 들고 있을 수 있다. "스캔 두 개가 끝까지"
     대비 이득이 목적이고, 0이 목표가 아니다.
-- **이전 `PDFDocumentProxy`를 `destroy()`하지 않는다** (#35). `PdfHost.#setDocument`가 `#doc`을
-  덮어쓸 뿐이라 한 세션에서 문서를 N번 열면 N개가 상주한다. **#34보다 큰 압력원**이다(문서를 열수록
-  단조 증가). v2.14.0에서는 크롭이 살아 있는 캔버스로 유지되므로 위 B7 실패에 직접 기여한다.
+  - ⚠ **엔진 쪽 미해결 (벤더링 시 upstream 확인 필요)**: 1차 패스의 `await page.getTextContent()`
+    안에서 문서가 destroy되면(#35) 그 promise가 **영원히 settle되지 않는다** — pdf.js worker의
+    `GetTextContent` 핸들러가 `task.terminated`면 sink를 error 처리하지 않고 빠지고,
+    `PDFPageProxy._destroy()`는 operator-list 스트림만 취소해 텍스트 스트림은 추적하지 않는다.
+    결과적으로 그 스캔의 async frame이 pinned돼 페이지 텍스트 메타데이터가 영구 상주한다(크롭
+    캔버스는 아니다 — 2차 패스의 `getOperatorList`는 정상 거절한다). 문서 교체마다 반복되므로
+    **단조 증가**다. 근본 해결은 엔진이 `getTextContent`를 abort signal과 race시키는 것이고,
+    Margin 쪽에서는 막을 수 없다.
+- ~~이전 `PDFDocumentProxy`를 `destroy()`하지 않는다~~ → **해소 (#35)**. `PdfHost.#setDocument`가
+  **뷰어·linkService를 새 문서로 전환한 뒤** 이전 문서를 `destroy()`한다(순서 반대면 뷰어가 방금
+  파괴된 문서를 렌더하려 한다). 정리 실패는 `console.warn`으로 삼켜 새 문서 로드를 막지 않는다.
+  - **로드 실패 시에는 이전 문서가 잠시 남는다**: `#setDocument`에 도달하지 못하므로 정리가 다음
+    성공 로드로 밀린다. `#doc`은 성공에서만 전진하므로 **누적되지 않고 최대 1개**다.
+    실패 시점에 정리하지 않는 이유는 "화면에 떠 있어서"가 아니다(`setLoading`이 이미 뷰어를
+    감췄다) — **`viewer.setDocument(null)`을 부르지 않았으므로 `PDFViewer`·`PDFLinkService`가
+    여전히 그 문서를 가리키고 page view도 마운트된 채 재렌더 가능**하기 때문이다. 창 크기 변경 →
+    `refreshFitWidthIfNeeded` → `viewer.update()` → `PDFPageView.draw()` 경로가 파괴된 페이지를
+    렌더하려 하며 터진다.
+  - **실패한 로드 자신의 `PDFDocumentLoadingTask`·전용 워커는 별도로 정리한다**: pdf.js는 실패 시
+    promise만 reject하고 task를 회수하지 않아, 파일 없음·권한 거부가 반복되면 **워커 스레드가
+    단조 증가**한다. `#awaitLoad`가 실패 경로에서 `loadingTask.destroy()`를 부른다.
+  - ⚠ **`GlobalWorkerOptions.workerPort`를 설정하면 이 정리가 위험해진다**: pdf.js가
+    `PDFWorker.fromPort`로 모든 문서가 공유하는 싱글턴 워커를 넘기므로, 한 문서를 destroy하면
+    나머지 문서의 워커까지 종료된다. 문서당 워커 1개가 전제다.
 
 ## 주의사항
 

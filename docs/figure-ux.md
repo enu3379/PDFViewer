@@ -67,8 +67,13 @@
 
 - 그림·표 탭 스캔 완료 시 `toFigureEntries()`로 변환해 storage 저장(문서당 1회, 재스캔 시 병합:
   `regionSource='manual'` 항목은 엔진 결과로 덮지 않음 — fig-extract-integration.md 규약).
-- captionAnchor: 엔진 captionText를 해당 페이지 텍스트 인덱스(S_p)에서 검색해 오프셋 계산(동 문서 규약).
-  실패 시 anchor 없이 저장(캡션 라벨 링크만 비활성, 나머지 기능 동작).
+  **저장은 `toFigureEntry(seed, doc, captionAnchor)`를 거친다** — `{ ...seed, … }` 스프레드는 seed
+  전용 필드(`captionPage`)를 그대로 영속시킨다(TS가 막지 않음, 동 문서 §cross-page 캡션).
+- captionAnchor: 엔진 captionText를 **`seed.captionPage`의** 텍스트 인덱스(S_p)에서 검색해 오프셋
+  계산(동 문서 규약). **그림 페이지가 아니다** — 캡션이 다음 장 상단이고 그림이 앞 페이지인
+  레이아웃(엔진 v2.19.0 12-B)에서 둘이 갈리고, 그때 그림 페이지에서 찾으면 **오류 없이** 빈손으로
+  끝난다. 같은 페이지면 `toFigureEntries()`가 `page`로 정규화해 주므로 늘 `captionPage`만 보면 된다.
+  검색 실패 시 anchor 없이 저장(캡션 라벨 링크만 비활성, 나머지 기능 동작).
 
 ### 4.2 점프 유틸 (G2) — `viewer/jump.ts`
 
@@ -89,8 +94,12 @@ jumpToRegion(page, rectPdf)     // 세로 중앙(큰 region은 1/8) + region 플
 
 - `core/mentions.ts` 스캔·주입은 §5.4 스펙 그대로(정규식·멱등 주입·캡션 자기 제외·단일 span 제한).
 - PDF 내장 링크: `PDFLinkService` 서브클래스 `goToDestination` 오버라이드 — dest 좌표가 어떤
-  FigureEntry의 region 또는 captionAnchor 근방(같은 페이지 ±40pt)이면 **패널 열기 + 해당 카드 강조 +
+  FigureEntry의 region 또는 captionAnchor 근방이면 **패널 열기 + 해당 카드 강조 +
   원점 칩 마킹**(DC-F1-B — §5.4 원계획의 R1 그대로), 아니면 기본 동작.
+  - "근방" 판정은 **비교 대상마다 기준 페이지가 다르다**: region은 `entry.region.page`, captionAnchor는
+    `entry.captionAnchor.page`와 각각 대조한 뒤 ±40pt를 잰다. cross-page figure(엔진 v2.19.0 12-B)에서는
+    이 둘이 다른 페이지이므로 "같은 페이지 ±40pt"를 entry 하나에 대해 한 번만 적용하면 캡션 쪽 히트를
+    통째로 놓친다.
 - `a.mgn-ref`(본문 참조)와 `a.mgn-ref[data-cap]`(캡션 라벨) 클릭 = 위와 동일한 패널 열기 핸들러 공유.
   annotation 링크와 겹치면 annotation 우선(§5.4 유지).
 

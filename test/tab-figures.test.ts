@@ -57,9 +57,15 @@ class FakeElement {
 }
 
 const doc = {} as PDFDocumentProxy;
-const figure = (page: number, num = String(page)): EngineFigure => ({
+const figure = (
+  page: number,
+  num = String(page),
+  captionPage?: number
+): EngineFigure => ({
   num,
   page,
+  /* 엔진은 captionPage가 page와 다를 때만 필드를 싣는다 — 없는 상태도 그대로 재현한다 */
+  ...(captionPage === undefined ? {} : { captionPage }),
   confidence: 1,
   caption: `Figure ${num}`,
   bboxPt: { x0: 0, y0: 0, x1: 10, y1: 10 },
@@ -118,6 +124,31 @@ describe('FiguresTab', () => {
     expect(onJumpToPage).toHaveBeenCalledWith(4);
   });
 
+  /* v2.19.0 12-B: 캡션은 7페이지, 그림은 6페이지. 카드가 가리키는 것은 **그림 페이지**다 —
+   * 식별 키가 (num, page)이고 사용자가 카드를 눌러 보고 싶은 것도 그림이다. captionPage로
+   * 바꾸는 뮤테이션을 이 테스트가 죽인다 (기존 픽스처는 captionPage가 없어 구별 불가였다). */
+  it('points cards at the figure page, not the caption page', async () => {
+    const list = new FakeElement();
+    const onJumpToPage = vi.fn();
+    const engine = makeEngine(vi.fn(async () => result([figure(6, '4', 7)])));
+    const tab = new FiguresTab(
+      list as unknown as HTMLElement,
+      { onJumpToPage },
+      engine
+    );
+
+    tab.setDocument(doc);
+    await vi.waitFor(() => expect(list.children[0]?.className).toBe('fig-card'));
+
+    const card = list.children[0];
+    expect(card.dataset.page).toBe('6');
+    expect(card.attributes['aria-label']).toBe('Figure 4, 6페이지로 이동');
+    /* 카드 머리의 "p.N" 칩도 그림 페이지다 (children: img, head[label, page], caption) */
+    expect(card.children[1].children[1].textContent).toBe('p.6');
+    list.emit('click', card);
+    expect(onJumpToPage).toHaveBeenCalledWith(6);
+  });
+
   it('offers a retry after failure and succeeds without replacing the document', async () => {
     const list = new FakeElement();
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -137,6 +168,58 @@ describe('FiguresTab', () => {
     await vi.waitFor(() => expect(extract).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(list.children[0]?.textContent).toContain('감지된 figure가 없어요'));
     expect(error).toHaveBeenCalledTimes(1);
+  });
+
+  /* 엔진 v2.19.1+는 렌더 결과가 존재하지 않을 때(메모리 압력으로 Chrome이 캔버스 백킹 스토어를
+   * 회수) `name === 'FigRenderError'`로 거절한다. 일시적 조건이라 재시도가 유효하므로 일반
+   * 실패와 다른 문구를 준다 — 통합 규약 §주의사항 `FigRenderError`. */
+  it('tells the user to retry when the engine reports a dead canvas', async () => {
+    const list = new FakeElement();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renderError = new Error('페이지 렌더 결과가 비어 있습니다');
+    renderError.name = 'FigRenderError';
+    const tab = new FiguresTab(
+      list as unknown as HTMLElement,
+      { onJumpToPage: vi.fn() },
+      makeEngine(vi.fn(async () => { throw renderError; }))
+    );
+
+    tab.setDocument(doc);
+    await vi.waitFor(() => expect(list.children[0]?.children[0]?.className).toContain('fig-retry'));
+    expect(list.children[0]?.textContent).toContain('메모리가 부족했을 수 있어요');
+  });
+
+  /* 엔진의 판별식은 `!!error && error.name === "FigRenderError"`다. 소비자가 `instanceof Error`를
+   * 덧붙이면 realm 경계나 구조화 복제를 넘어온 거절에서 이름은 맞는데 분기만 조용히 사라진다.
+   * Error 인스턴스가 아닌 거절로 그 좁힘을 죽인다. */
+  it('recognises the engine error by name alone, not by instanceof', async () => {
+    const list = new FakeElement();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const tab = new FiguresTab(
+      list as unknown as HTMLElement,
+      { onJumpToPage: vi.fn() },
+      makeEngine(vi.fn(async () => {
+        throw { name: 'FigRenderError', message: '페이지 렌더 결과가 비어 있습니다' };
+      }))
+    );
+
+    tab.setDocument(doc);
+    await vi.waitFor(() => expect(list.children[0]?.children[0]?.className).toContain('fig-retry'));
+    expect(list.children[0]?.textContent).toContain('메모리가 부족했을 수 있어요');
+  });
+
+  it('keeps the generic message for other failures', async () => {
+    const list = new FakeElement();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const tab = new FiguresTab(
+      list as unknown as HTMLElement,
+      { onJumpToPage: vi.fn() },
+      makeEngine(vi.fn(async () => { throw new Error('boom'); }))
+    );
+
+    tab.setDocument(doc);
+    await vi.waitFor(() => expect(list.children[0]?.children[0]?.className).toContain('fig-retry'));
+    expect(list.children[0]?.textContent).toContain('figure 스캔에 실패했어요');
   });
 
   it('discards a stale scan when the document changes', async () => {

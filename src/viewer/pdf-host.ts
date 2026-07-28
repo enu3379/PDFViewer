@@ -318,9 +318,10 @@ export class PdfHost {
     this.refreshLayoutSoon();
     /* 이전 문서는 **뷰어·linkService가 새 문서로 전환된 뒤에** 정리한다 (#35). pdf.js는
      * PDFDocumentProxy를 destroy()하지 않으면 워커 측 자원과 페이지 프록시를 계속 붙들고 있어
-     * GC 대상이 되지 않는다 — 한 세션에서 문서를 N번 열면 N개가 그대로 상주하고, 벤더링본
-     * v2.14.0에서는 크롭도 살아 있는 캔버스라 Chrome이 캔버스 백킹 스토어를 회수하는 조건
-     * (엔진 백로그 B7)에 직접 기여한다.
+     * GC 대상이 되지 않는다 — 한 세션에서 문서를 N번 열면 N개가 그대로 상주해 Chrome이 캔버스
+     * 백킹 스토어를 회수하는 메모리 압력 조건(엔진 백로그 B7)에 직접 기여한다.
+     * (크롭 자체는 엔진 v2.19.1부터 PNG 문자열이라 회수 대상이 아니다. 남은 기여분은 문서
+     *  프록시·워커 자원과 페이지 캔버스 쪽이다.)
      * 순서가 중요하다 — 전환 전에 destroy하면 뷰어가 방금 파괴된 문서를 렌더하려 한다. */
     if (previous && previous !== doc) void this.#releaseDocument(previous);
   }

@@ -231,7 +231,9 @@ onMouseUp:
 - 시작 시점: Margin 뷰어가 `PDFDocumentProxy`를 확보하는 즉시 엔진 스캔을 시작한다. 그림·표 탭 오픈은
   결과 표시 또는 진행 상태 확인만 담당한다.
 - **문서 내 figure 목록(존재·번호·region·captionText)의 단일 진실 공급원은 엔진이다.**
-- `captionAnchor`는 엔진이 반환한 `captionText`를 해당 페이지 `S_p`에서 검색해 Margin 측이 채운다.
+- `captionAnchor`는 엔진이 반환한 `captionText`를 `FigureSeed.captionPage`의 `S_p`에서 검색해 Margin 측이 채운다.
+  **`page`(그림 페이지)가 아니다** — 캡션이 다음 장 상단이고 그림이 앞 페이지인 레이아웃(엔진 v2.19.0 12-B)에서
+  둘이 갈린다. `toFigureEntries()`가 같은 페이지면 `page`로 정규화해 주므로 항상 `captionPage`만 보면 된다.
 - 엔진 미감지(figures에 없음) 또는 region 이상 시의 안전망은 §6 수동 크롭 그대로.
 - `confidence`는 현재 엔진이 1.0 고정으로 반환(placeholder). 실측 매핑 도입 전까지
   "영역 확인 필요" 배지는 수동 크롭 유도 용도로만 사용.

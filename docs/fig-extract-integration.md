@@ -28,15 +28,20 @@ figure 감지 엔진(`src/core/fig-extract.js`)의 반입·사용 규약. 엔진
 ## 사용법
 
 ```ts
-import { FigExtract, toFigureEntries } from "../core/fig-engine";
+import { FigExtract, toFigureEntries, toFigureEntry } from "../core/fig-engine";
 
 // 뷰어가 이미 문서를 로드했으므로 재파싱 없이 PDFDocumentProxy를 넘긴다 (data는 null)
 const res = await FigExtract.extract(null, {
   pdfDocument: pdfHost.pdfDocument,
-  renderPage: (pageNum, scale) => renderCache.getPageCanvas(pageNum, scale), // 선택
+  signal: abortController.signal,   // 문서 교체 시 필수 — 아래 §주의사항 취소
+  // renderPage: … ← **주입하면 죽은 캔버스 검사(FigRenderError)가 꺼진다.** 아래 §주의사항
+  //   FigRenderError 참조. 렌더 캐시 재사용 이득과 백지 크롭 보호를 맞바꾸는 선택이므로
+  //   지금은 주입하지 않는다.
 });
 const seeds = toFigureEntries(res, (p) => pageHeights[p]);
-// seeds: FigureEntry에서 doc·captionAnchor만 빠진 형태 — 호출 측이 채워서 저장
+// seeds: FigureEntry에서 doc·captionAnchor가 빠지고 captionPage가 더해진 형태.
+// 영속화는 반드시 toFigureEntry()로 — captionPage를 떨어뜨린다 (아래 §cross-page 캡션)
+const entry = toFigureEntry(seed, docId, anchorFoundIn(seed.captionPage, seed.captionText));
 ```
 
 ## 현재 통합 상태
@@ -48,61 +53,52 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 - 엔진은 전역 `pdfjsLib`(OPS 등)에 의존하는데, 번들 환경에서는 `fig-engine.ts`가
   pdfjs-dist import를 전역에 주입해 해결한다 — 엔진 사용 전 `fig-engine.ts`를 거치면 됨.
 
-### 벤더링본 v2.14.0 vs 선언 타입 (2026-07-28 현재)
+### v2.19.4 벤더링 — 완료 (2026-07-28)
 
-`src/core/fig-extract.js`는 **v2.14.0**이고, `fig-engine.ts` 타입은 여기에 **v2.19.1의 *제거*만
-반영**한 상태다 — v2.19.1 계약 전체를 반영한 것이 **아니다**.
+엔진 `fig-extract.js` v2.19.4(엔진 SHA `af44f5a`)를 `src/core/fig-extract.js`로 벤더링하고
+`VENDORED_ENGINE_VERSION`을 함께 갱신했다. 소비자 측 대응(`fig-engine.ts`·`tab-figures.ts`·테스트·
+이 문서)은 같은 변경에 포함돼 있다.
 
-운영 원칙: **선언 타입은 벤더링 런타임이 실제로 제공하는 것의 부분집합으로 유지한다.**
-제거는 지금 반영하고, 추가는 벤더링과 함께 반영한다.
+#### 부분집합 원칙과 이번에 그 원칙이 적용되지 않는 이유
 
-근거는 "좁히는 게 안전해서"가 아니라 **두 방향의 실패 방식이 다르기 때문**이다.
+운영 원칙은 **선언 타입은 벤더링 런타임이 실제로 제공하는 것의 부분집합으로 유지한다**이다 —
+제거는 먼저 반영하고, 추가는 벤더링과 **함께** 반영한다. 근거는 "좁히는 게 안전해서"가 아니라
+**두 방향의 실패 방식이 다르기 때문**이다.
+
 - **좁히기는 컴파일 타임에 요란하게 실패한다** — 누군가 그 필드를 쓰고 있었다면 그 PR에서 즉시 타입
-  에러가 난다. 단, 런타임이 여전히 그 필드에 의존한다면(아래 `cropCanvas`가 정확히 그렇다) 그
-  사실을 **다른 곳에 남겨야 한다**. 그래서 이 절이 존재한다.
-- **넓히기는 런타임에 조용히 실패한다** — 컴파일도 되고 배포도 되고 아무 일도 안 일어난다. 누구도
-  알아차릴 계기가 없다. 전체 v2.19.1 계약을 미리 선언하면 벤더링 시점에 "이 필드를 이제 처리해야
-  한다"고 강제하는 **컴파일 에러라는 유일한 강제 장치**까지 없어진다.
+  에러가 난다. 단, 런타임이 여전히 그 필드에 의존한다면(v2.14.0의 `cropCanvas`, v2.19.1+의
+  `cropPng_`가 정확히 그렇다) 그 사실을 **다른 곳에 남겨야 한다**.
+- **넓히기는 런타임에 조용히 실패한다** — 컴파일도 되고 배포도 되고 아무 일도 안 일어난다.
 
-이 원칙은 **필드·옵션 같은 구조에만** 적용된다. 동작 서술(주석·문서)은 별도로, 벤더링본에서
-성립하지 않으면 그 사실을 명시한다. 버전 스큐 자체는 `fig-engine.ts`의 `VENDORED_ENGINE_VERSION`
-상수와 이를 검사하는 테스트가 지킨다 — 벤더링하면 테스트가 깨지고, 그게 이 목록으로 돌아오라는 신호다.
+이번 벤더링은 **추가와 파일 복사를 한 변경에 담았다** — 원칙의 "함께"에 해당한다.
+`ExtractOptions.cropImages`·`onDiagnostic`은 이제 런타임 v2.19.4가 실제로 지원한다.
 
-그래서 v2.15.0~v2.19.1이 **추가한** 것들(`captionPage`, `onDiagnostic`, `cropImages`)은 아직 타입에
-없고 아래 §다음 벤더링 할 일에 있다.
+**핀이 지키는 범위는 좁다.** `VENDORED_ENGINE_VERSION` 핀이 검사하는 것은 **상수 ↔ 엔진 파일**
+한 쌍뿐이다 — 어느 쪽을 먼저 바꿔도 깨지므로 그 둘의 스큐는 잡힌다. 그러나 **선언 타입이 어느
+버전 기준으로 쓰였는지는 어떤 테스트도 알 수 없다.** 타입만 새 계약으로 앞서 나간 상태는 초록으로
+통과한다. 그래서 타입 변경은 반드시 파일 복사와 같은 커밋에 두어야 하고, 이 규칙을 지키는 것은
+아래 §갱신 절차를 읽는 사람의 몫이다.
 
-**현재 실제로 돌아가는 코드(v2.14.0)의 크롭 동작** — 아래 §주의사항의 v2.19.1 서술과 다르다:
 
-- `fig-extract.js:2333`이 figure마다 `cropCanvas`를 만들고, `:2377`의 `cropDataURL`은 **그 캔버스를
-  읽는 순수 접근자**다. 즉 `cropCanvas`는 타입에서 사라졌어도 **런타임에서는 여전히 load-bearing**이다.
-  → 엔진이 준 figure 객체를 **그대로** `cropDataURL`에 넘겨야 한다. 선언된 필드만으로 재구성하거나
-  `structuredClone`·`JSON.parse(JSON.stringify(...))`를 거치면 타입 검사는 통과하고 런타임에서
-  `Cannot read properties of undefined (reading 'toDataURL')`로 죽는다. M3의 storage 저장 작업이
-  정확히 이 함정을 부른다.
-- `tab-figures.ts:72`가 `result.figures`를 세션 내내 보관하고 `:110`은 스캔이 **다 끝난 뒤** 렌더에서야
-  `cropDataURL`을 부른다 — v2.5.1~v2.19.0의 "프리뷰 생성 후 참조를 버려라" 지침이 여기서는 지켜지지
-  않는다. 그래서 백로그 B7이 기술한 실패(Chrome이 캔버스 백킹 스토어를 회수 → 전면 투명)가
-  **이 확장에서도 일어날 수 있고**, v2.14.0에는 `FigRenderError`가 없으므로 증상은 **오류도 재시도
-  버튼도 없이 프리뷰 카드가 백지로 뜨는 것**이다. 벤더링 전까지는 이 상태다.
 
-#### 다음 벤더링 할 일
+#### 이미 반영된 것 (구 §다음 벤더링 할 일)
 
-1. 엔진 repo(**PDFViewer-Figure-Extract** — 로컬 체크아웃 이름은 `figure-preview-test`)의
-   `fig-extract.js`(v2.19.1+) → `src/core/fig-extract.js` 복사 (PB-5, byte-identical 확인).
-2. **`EngineFigure`에 `captionPage?: number` 추가 + `toFigureEntries`에서 보존** (v2.19.0 12-B).
-   **미룬 이유는 부분집합 원칙이 아니라 스키마 결정이다** — 이 필드는 소비자가 *읽는* 값이고
-   v2.14.0은 cross-page figure를 아예 방출하지 않으므로 지금 선언해도 `undefined`가 정직한 답이다
-   (`cropImages`/`onDiagnostic`처럼 "껐는데 안 꺼지는" 거짓이 아니다). 진짜 이유는 보존하려면
-   `FigureSeed`/`FigureEntry` 스키마를 넓혀야 하고 그건 M3 설계와 함께 정할 일이라는 것이다.
-   방치 시 결과: 캡션이 다음 장 상단이고 그림이 앞 페이지면 엔진이 `page`(그림) ≠ `captionPage`로
-   방출하는데 `toFigureEntries`가 명시적 리터럴을 만들며 이 필드를 **버려서**, M3의 captionAnchor
-   계산이 그림 페이지에서 캡션을 찾다가 **오류 없이 조용히 실패**한다.
-3. `ExtractOptions`에 `cropImages?: boolean`(v2.19.1 진단 전용) 추가. **벤더링 전에는 넣지 말 것** —
-   v2.14.0은 이 옵션을 무시하므로 타입만 먼저 있으면 "껐는데 안 꺼지는" 오용을 부른다.
-4. `ExtractOptions`에 `onDiagnostic?: (records: unknown[]) => void` 추가 (v2.15.0 `[필드 추가]`).
-   v2.14.0에서는 무시돼 record가 조용히 안 온다 — 역시 벤더링과 함께.
-5. `tab-figures.ts`에서 `error.name === 'FigRenderError'`를 분기해 "메모리가 부족했을 수 있어요 —
-   다시 시도해 주세요" 문구를 노출 (현재는 일반 실패 문구 + 재시도 버튼).
+| 항목 | 상태 |
+|---|---|
+| `EngineFigure.captionPage?: number` + `toFigureEntries` 보존 (v2.19.0 12-B) | 완료 — 아래 참조 |
+| `ExtractOptions.cropImages?: boolean` (v2.19.1 진단 전용) | 완료 (선언만 — 호출부 없음) |
+| `ExtractOptions.onDiagnostic?: (records: unknown[]) => void` (v2.15.0) | 완료 (선언만 — 호출부 없음) |
+| `tab-figures.ts`의 `FigRenderError` 분기 문구 | 완료 (판별식은 엔진과 동일하게 `name`만 본다) |
+| v2.14.0 크롭 캔버스 수명 경고 (`cropCanvas` load-bearing) | 무효화 — v2.19.1이 PNG 직렬화로 대체 |
+| `toFigureEntry()` — seed→영속 엔트리 경계 (백로그에 없던 신규) | 완료 — `captionPage` 누출 차단 |
+
+**`captionPage`의 스키마 결정** (미뤄져 있던 진짜 쟁점): `FigureEntry`는 넓히지 **않았다**.
+`FigureEntry.captionAnchor.page`가 이미 목적지 필드이기 때문이다. 대신 `FigureSeed`가
+`captionPage: number`를 나른다 — 그 값을 계산하는 데 필요한 정보를 seed가 나르고 호출 측이
+`captionAnchor`로 접는 구조다. 엔진의 optional을 그대로 흘리지 않고 **경계에서 `?? page`로
+정규화**해 항상 존재하는 `number`로 만든다: optional을 흘리면 호출 측이 보정을 잊어도 컴파일이
+통과하고 captionAnchor 검색이 그림 페이지에서 **오류 없이 조용히 실패**하는데, 그게 애초에 이
+항목이 백로그에 오른 이유였다.
 
 ### 벤더링과 무관한 선재 결함
 
@@ -115,7 +111,8 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
     진행 중 렌더의 `RenderTask.cancel()`에서만 멈춘다. 문서를 바꾼 뒤에도 나가는 스캔이 **약 1페이지
     분량**(페이지 캔버스 1장 + 그 페이지까지의 크롭)을 더 들고 있을 수 있다. "스캔 두 개가 끝까지"
     대비 이득이 목적이고, 0이 목표가 아니다.
-  - ⚠ **엔진 쪽 미해결 (벤더링 시 upstream 확인 필요)**: 1차 패스의 `await page.getTextContent()`
+  - ⚠ **엔진 쪽 미해결 — v2.19.4에서도 그대로다** (2026-07-28 upstream `fig-extract.js:3559` 확인:
+    `const tc = await page.getTextContent();`, signal과 race시키지 않는다): 1차 패스의 `await page.getTextContent()`
     안에서 문서가 destroy되면(#35) 그 promise가 **영원히 settle되지 않는다** — pdf.js worker의
     `GetTextContent` 핸들러가 `task.terminated`면 sink를 error 처리하지 않고 빠지고,
     `PDFPageProxy._destroy()`는 operator-list 스트림만 취소해 텍스트 스트림은 추적하지 않는다.
@@ -177,31 +174,77 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
   정상 렌더의 기대 투명 비율은 0이다. **`renderPage`로 캔버스를 주입하면 이 불변식이 없어 검사가
   적용되지 않는다** — Margin이 렌더 캐시를 주입하기 시작하면 이 보호도 함께 사라진다는 뜻이다.
   조용히 빈 그림을 내놓는 대신 실패시킨다는 판단이며, **일시적 조건이라 재시도가 유효하다**.
-  `tab-figures.ts`의 기존 try/catch → 에러 상태 → "다시 시도" 경로가 **오류를 처리하기에는** 충분하다
-  (상태 기계 추적 결과 스캔이 멈춰 있는 경로 없음). 다만 두 가지가 남는다: ① 메시지가 일반 문구라
-  "메모리가 부족했을 수 있으니 다시 시도해 보세요"를 알리려면 `error.name` 분기가 필요하고,
-  ② `#scan()`이 `signal`을 넘기지 않아 문서 교체 시 이전 스캔이 계속 돌면서 **이 오류의 발생 확률을
-  호스트가 스스로 올리고 있다**. ①은 위 §다음 벤더링 할 일, ②는 위 §벤더링과 무관한 선재 결함에 있다.
+  - ⚠ **벤더링 후 사용자에게 보이는 변화는 "문구가 친절해진다"가 아니다.** 이 오류는 페이지 루프
+    **안에서** 던져져 `extract()` 전체를 reject시킨다 — **부분 결과가 없다.** 앞 20페이지에서
+    figure를 정상적으로 다 잡았어도 21페이지에서 캔버스가 회수되면 목록은 **0건**이고 에러 카드만
+    남는다. v2.14.0에서는 같은 상황에서 목록은 전부 나오고 해당 카드만 백지였다. 즉 실패 모드가
+    **"일부 백지" → "전부 없음"으로 옮겨간다.** 조용한 오염보다 낫다는 판단이지만, 사용자가 보는
+    최악의 순간은 더 나빠진다.
+  - 재시도는 **백오프 없이 즉시 전량 재스캔**이다(`ensureScanned` → `#scan` → `extract`). 메모리
+    압력이 아직 가시지 않았으면 같은 지점에서 다시 죽으면서 스캔 비용만 한 번 더 든다. 그래서
+    문구가 "다른 탭을 닫고"를 먼저 말한다 — 사용자가 조건을 바꾸도록 유도하는 것이 유일한 완화다.
+  - `tab-figures.ts`가 `error.name === 'FigRenderError'`를 분기해 "메모리가 부족했을 수 있어요. 다른
+    탭을 닫고 다시 시도해 주세요." 문구를 띄운다(그 외 실패는 일반 문구). 판별식은 엔진과 똑같이
+    `name`만 본다 — `instanceof Error`를 덧붙이면 소비자가 공급자보다 좁아진다.
+  - `#scan()`이 `signal`을 넘겨 문서 교체 시 이전 스캔을 실제로 중단시키므로(#34) 호스트가 스스로
+    이 오류의 발생 확률을 올리던 문제는 해소됐다.
+- **cross-page 캡션** (v2.19.0 12-B): 캡션이 다음 장 상단이고 그림이 앞 페이지면 엔진이
+  `figure.captionPage`를 함께 방출한다(같은 페이지면 필드 자체가 없다 — 실측상 항상 `page + 1`).
+  **`figure.page`는 그림 페이지이고 식별 키는 여전히 `(num, page)`다.** 페이지 점프·`region`은
+  `page`, **캡션 텍스트 검색과 `captionBoxPt` 좌표 변환은 `captionPage`** 기준이다
+  (`toPdfRect(captionBoxPt, …)`에 그림 페이지 높이를 넣으면 조용히 틀린다).
+  `toFigureEntries()`가 `captionPage ?? page`로 정규화해 `FigureSeed.captionPage: number`로 넘기므로
+  소비자는 optional을 다룰 필요가 없다 — 그 값이 `FigureEntry.captionAnchor.page`가 된다.
+  - **방향은 구조적으로 한쪽뿐이다**: 12-B는 캡션 페이지 앵커에 대해 `candidatePage = 캡션 페이지 − 1`
+    후보만 만들므로 `captionPage === page + 1`이 항상 성립한다. 관측된 경향이 아니라 후보 생성 규칙의
+    귀결이다 — `Math.abs()`나 앞/뒤 양방향 탐색 같은 일반화를 넣지 말 것.
+  - ⚠ **`captionPage`는 seed 전용이다. 영속 스키마(`FigureEntry`)에 넣지 말 것** —
+    `captionAnchor.page`와 중복이고 `store.saveDoc`은 화이트리스트 없이 통째로 저장한다.
+    TS strict도 스프레드(`{ ...seed, doc, captionAnchor }`)에는 초과 속성 검사를 하지 않으므로
+    컴파일이 막아주지 않는다. **`toFigureEntry(seed, doc, captionAnchor)`를 거칠 것** — 필드를 명시
+    나열해 seed 전용 필드를 떨어뜨리고, `test/fig-engine.test.ts`가 반환 키 집합을 고정한다.
 - **pdf.js 버전**: 엔진은 pdfjs-dist 4.10.38(프로젝트 고정 버전) 기준으로 테스트 샘플 검증됨.
 - **confidence**: 현재 1.0 고정 (플레이스홀더). 추후 감지 경로별 실측 값으로 교체 예정.
 - **Table 미지원**: 엔진은 figure만 감지한다. Table region은 v1에서 수동 크롭으로 처리.
 - **텍스트 레이어 없는 PDF(스캔본)**: 캡션을 찾지 못해 figures가 빈 배열 — 정상 동작.
-- **캡션 앵커·다방향 한계**: "Figure N" 표기가 아예 없는 문서는 구조적 미탐지다. v2.8.0부터 캡션 위·아래·좌·우 figure 후보를 지원하지만, side caption의 세로 정렬 증거가 약하거나 기존 상향 후보가 강하면 보수적으로 미탐지/기존 영역을 유지할 수 있다. 캡션이 다음 장 상단에 있고 그림이 앞 페이지에 있는 레이아웃은 **v2.19.0 12-B에서 지원**한다(그 경우 `page`≠`captionPage`) — 벤더링본 v2.14.0에는 아직 없다 (엔진 repo ALGORITHM.md §알려진 한계).
+- **캡션 앵커·다방향 한계**: "Figure N" 표기가 아예 없는 문서는 구조적 미탐지다. v2.8.0부터 캡션 위·아래·좌·우 figure 후보를 지원하지만, side caption의 세로 정렬 증거가 약하거나 기존 상향 후보가 강하면 보수적으로 미탐지/기존 영역을 유지할 수 있다. 캡션이 다음 장 상단에 있고 그림이 앞 페이지에 있는 레이아웃은 **v2.19.0 12-B에서 지원**한다(그 경우 `page`≠`captionPage` — 위 §cross-page 캡션) (엔진 repo ALGORITHM.md §알려진 한계).
 - **캡션 표기 확대 (v2.9.x)**: 번호 뒤 구분자가 없는 표기(RSC·Springer `Fig. 1 본문…`, Wiley 자간 분리 `F I G U R E 1 본문…`)를 **문서 수준 게이트를 통과한 문서에서만** 앵커로 승격한다 — 한 문서가 캡션 관습을 하나만 쓴다는 전제라, hard 앵커가 이미 잡히는 문서에는 적용되지 않는다(표기가 섞인 문서는 미적용). 나란한 figure의 캡션이 8pt 미만 간격으로 한 줄에 붙은 경우도 분해해 각각 앵커한다.
 - **번호 글리프에 ToUnicode 매핑이 없는 PDF는 원리상 미탐지**: 번호가 화면에는 정상으로 보이는데 텍스트 레이어에 문자가 없는 문서가 있다(Wiley 일부). 엔진이 아니라 PDF 쪽 문제라 사용자 눈에는 "번호가 멀쩡히 보이는데 안 잡힌다"로 보인다 — 문의가 오면 수동 크롭 안내가 맞다.
 - **영역 경계 정밀화 (v2.10.x)**: figure/table·나란한 컬럼 경계 판정을 개선했다 — table 캡션을 **경계로만** 인식해 인접 figure 크롭에서 table을 제외(v2.10.0, table 자체 방출은 없음), 좌우로 나란한 두 figure가 서로를 통째로 크롭하던 것을 각자 캡션 컬럼으로 분리(v2.10.1 같은 baseline, v2.10.2 baseline 어긋난 offset). 출력 필드·좌표계·(num,page) 식별자 불변 — bbox가 더 타이트해질 뿐이라 소비자 코드 변경은 불요.
-- **캡션 문법 확대 (v2.11.0)**: 보충·부록 캡션의 inline 표기를 새로 잡는다 — `Fig. S1.`·`Figure S1:`·`Figure A1.`(문자접두 번호), `Supplemental`/`Supporting Figure N`(접두), `FIG. 3 (color online).`·`Figure 1 (저자명).`(괄호 한정구). 전부 **점형 canonical**(`S.N`·`A.N`)으로 방출하므로 `num` 필드에 `"S.1"`·`"A.1"` 형태가 더 자주 등장한다(v2.6.0의 `ED.N`·prefix `S.N`과 동일한 표기 규약 — 새 값 형태 아님). 출력 필드·좌표계·(num,page) 식별자·manifest 스키마 불변, 소비자 코드 변경 불요. 주의: 한 물리 figure의 캡션에 다른 계열 라벨이 중첩된 오제출 문서(예: Extended Data 캡션 본문에 `Figure S1.`)는 같은 그림을 `ED.N`+`S.N` 두 번 방출할 수 있다(candidate suppression 미구현 — 엔진 repo 백로그, n=1 코너).
+- **캡션 문법 확대 (v2.11.0)**: 보충·부록 캡션의 inline 표기를 새로 잡는다 — `Fig. S1.`·`Figure S1:`·`Figure A1.`(문자접두 번호), `Supplemental`/`Supporting Figure N`(접두), `FIG. 3 (color online).`·`Figure 1 (저자명).`(괄호 한정구). 전부 **점형 canonical**(`S.N`·`A.N`)으로 방출하므로 `num` 필드에 `"S.1"`·`"A.1"` 형태가 더 자주 등장한다(v2.6.0의 `ED.N`·prefix `S.N`과 동일한 표기 규약 — 새 값 형태 아님). 출력 필드·좌표계·(num,page) 식별자·manifest 스키마 불변, 소비자 코드 변경 불요. ~~주의: 한 물리 figure의 캡션에 다른 계열 라벨이 중첩된 오제출 문서(예: Extended Data 캡션 본문에 `Figure S1.`)는 같은 그림을 `ED.N`+`S.N` 두 번 방출할 수 있다~~ → **v2.16.0에서 해소**: 줄의 identity(첫 라벨)가 ED면 같은 줄의 S 라벨은 형제 앵커로 만들지 않는다(표기 관습 근거, 임계 없음). 유령 `S.N`과 그로 인한 ED 영역 축소가 함께 사라졌다.
 - **전면 figure 크롭 개선 (v2.12.0)**: Nature Extended Data류 **전면(full-page) figure**가 과대 패널티에 눌려 페이지 일부만 크롭되던 것을 해소했다 — 전면 figure의 크롭 영역이 더 정확(전체)해진다. 출력 필드·좌표계·(num,page)·manifest 스키마 불변, 소비자 코드 변경 불요(bbox가 truth에 더 가까워질 뿐).
+- **감지 품질 개선만 있고 소비자 코드 변경이 불요한 버전들** — 출력 필드·좌표계·`(num,page)` 식별자 전부 불변이고 bbox/검출률만 좋아진다:
+  v2.13.0(수평 잉크 커버리지 판별자로 전면 figure 오발 해소) · v2.13.1(폭 바닥 가드) ·
+  v2.14.0(soft 캡션 문서 게이트 강건화 — 혼합 관습 문서의 캡션 몰살 해소) ·
+  v2.16.0(중첩 라벨 계열 경합 — 한 캡션 줄의 `ED.N`+`S.N` 이중 방출 억제) ·
+  v2.19.2(캡션 라벨 앞 삼각 조판 글리프 허용) · v2.19.3/.4(머리글 장식 띠 오방출 거부).
+  v2.17.0·v2.18.0은 진단 관측 전용으로 `[계약 무변경]`이다.
 - 엔진은 백그라운드 탭에서 크롬 타이머 스로틀링의 영향을 받는다(분석이 수십 배 느려짐).
   전체 문서 스캔은 사용자가 뷰어를 보고 있는 동안 idle로 돌리는 것을 권장.
 
 ## fig extractor 작업자를 위한 갱신 절차
 
 1. 엔진 전용 별도 repo에서 새 버전 검증 완료 후 (엔진 repo `docs/DEV.md` §버전 릴리스 절차)
-2. `fig-extract.js`를 `src/core/`에 **그대로 복사** — v2.3.0부터 엔진 파일에 globalThis 노출이 포함되어
+2. **복사 전에 엔진 repo가 clean한지 확인** — `git -C <엔진repo> status --porcelain`이 비어 있어야 하고,
+   `git -C <엔진repo> rev-parse HEAD`로 SHA를 적어 둔다.
+   더티한 작업 트리를 복사하면 **어느 커밋에도 존재하지 않는 엔진이 벤더링되는데 두 파일 diff는
+   0건이라 아무 검사에도 안 걸린다** — 나중에 그 코드를 되짚을 방법이 없어진다.
+3. `fig-extract.js`를 `src/core/`에 **그대로 복사** — v2.3.0부터 엔진 파일에 globalThis 노출이 포함되어
    byte-identical 복사면 됨. 복사 후 두 파일 diff가 0건인지 확인
-3. 엔진 헤더 체인지로그의 계약 태그 확인 — `[필드 추가]`/`[BREAKING]`이면
-   `fig-engine.ts`·`fig-extract.d.ts` 타입과 이 문서의 계약 서술을 함께 갱신
-4. 이 문서 §주의사항이 새 버전과 어긋나지 않는지 확인 (예: confidence 실측화 시 해당 항목 갱신)
-5. `npm run typecheck && npm run build` 확인 후 그림·표 탭에서 샘플 PDF 1개 스모크 테스트
-6. 커밋 메시지에 엔진 버전 명시 (예: `chore: bump fig-extract to v2.3.0`)
+4. **`fig-engine.ts`의 `VENDORED_ENGINE_VERSION`을 같은 커밋에서 새 버전으로 갱신** —
+   `test/fig-engine.test.ts`의 버전 핀이 3과 4 사이 상태를 실패로 만든다. 이 실패가
+   "계약 태그를 다시 읽어라"는 신호다. **핀이 지키는 것은 상수 ↔ 엔진 파일 한 쌍뿐이고,
+   타입·주석이 어느 버전 기준인지는 검사하지 못한다** — 그건 아래 5가 하는 사람의 일이다.
+5. 엔진 헤더 체인지로그의 계약 태그 확인 — `[필드 추가]`/`[BREAKING]`이면 `fig-engine.ts` 타입과
+   이 문서의 계약 서술을 함께 갱신. (`fig-extract.d.ts`는 `export {}` 스텁이라 갱신할 것이 없다 —
+   타입은 전부 `fig-engine.ts`에 있다.)
+   엔진의 실제 export 목록(파일 끝 `return { … }`)도 확인할 것 — v2.19.1의 `cropCanvas` 제거처럼
+   손으로 쓴 `FigExtractApi`와 갈라질 수 있다(`test/fig-engine.test.ts`가 뷰어가 부르는 세 함수의
+   존재만 지킨다).
+6. 이 문서 §주의사항이 새 버전과 어긋나지 않는지 확인 (예: confidence 실측화 시 해당 항목 갱신)
+7. `npm run typecheck && npm test && npm run build` 확인 후 그림·표 탭에서 샘플 PDF 1개 스모크 테스트
+8. 커밋 메시지에 엔진 버전과 **2에서 적어 둔 엔진 SHA**를 명시
+   (예: `chore: bump fig-extract to v2.19.4` + 본문에
+   `engine: onetwothr1/PDFViewer-Figure-Extract@<복사 시점 HEAD SHA>`).
+   엔진 repo는 알고리즘과 무관한 커밋(truth·docs)으로도 전진하므로 **버전 문자열만으로는 어느
+   커밋을 복사했는지 특정되지 않는다** — 같은 v2.19.4가 여러 SHA에 걸쳐 있다.

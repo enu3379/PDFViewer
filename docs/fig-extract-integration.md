@@ -41,7 +41,8 @@ const res = await FigExtract.extract(null, {
 const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 // seeds: FigureEntry에서 doc·captionAnchor가 빠지고 captionPage가 더해진 형태.
 // 영속화는 반드시 toFigureEntry()로 — captionPage를 떨어뜨린다 (아래 §cross-page 캡션)
-const entry = toFigureEntry(seed, docId, anchorFoundIn(seed.captionPage, seed.captionText));
+const entries = seeds.map((seed) =>
+  toFigureEntry(seed, docId, anchorFoundIn(seed.captionPage, seed.captionText)));
 ```
 
 ## 현재 통합 상태

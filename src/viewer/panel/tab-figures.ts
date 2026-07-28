@@ -8,6 +8,18 @@ export type FiguresTabCallbacks = {
 type FiguresTabEngine = Pick<FigExtractApi, 'extract' | 'cropDataURL'>;
 
 /**
+ * 엔진이 `name`으로만 구별해 주는 렌더 실패 (v2.19.1+ — 별도 클래스가 아니라 이름을 덮어쓴 Error다).
+ *
+ * 엔진의 판별식(`fig-extract.js`: `!!error && error.name === "FigRenderError"`)을 **그대로** 쓴다.
+ * `instanceof Error`를 덧붙이면 소비자가 엔진보다 좁아진다 — 오류가 realm 경계(worker·다른 프레임)를
+ * 넘거나 구조화 복제를 거치면 `instanceof`가 깨지는데 `name`은 남아, 이름은 맞지만 분기만 조용히
+ * 사라진다. 좁힐 근거가 없으므로 공급자와 같은 술어를 쓴다.
+ */
+function isFigRenderError(error: unknown): boolean {
+  return !!error && (error as { name?: unknown }).name === 'FigRenderError';
+}
+
+/**
  * 그림·표 탭 — fig-extract 엔진으로 문서를 스캔해 figure 프리뷰 카드를 렌더한다.
  * 스캔은 PDFDocumentProxy가 준비되는 즉시 1회 실행한다. 문서가 바뀌면 setDocument()로 리셋.
  */
@@ -101,7 +113,15 @@ export class FiguresTab {
       if (this.#scanGeneration !== scanGeneration) return;
       console.error('figure 스캔 실패', error);
       this.#state = 'error';
-      this.#setStatus('figure 스캔에 실패했어요.', true);
+      /* FigRenderError(엔진 v2.19.1+)는 "렌더 결과가 존재하지 않는다" — 메모리 압력을 받은 Chrome이
+       * 캔버스 백킹 스토어를 회수한 경우다. 일시적 조건이라 같은 문서로 다시 시도하면 성공할 수
+       * 있으므로, 일반 실패와 달리 그 사실을 문구로 알린다. 재시도 경로 자체는 동일하다. */
+      this.#setStatus(
+        isFigRenderError(error)
+          ? '메모리가 부족했을 수 있어요. 다른 탭을 닫고 다시 시도해 주세요.'
+          : 'figure 스캔에 실패했어요.',
+        true
+      );
     } finally {
       if (this.#scanAbort === abort) this.#scanAbort = null;
     }

@@ -15,14 +15,24 @@
  *     pdfDocument: doc,        // 선택 — 이미 로드된 PDFDocumentProxy 재사용 (지정 시 data는 null 가능)
  *     renderPage: async (pageNum, scale) => canvas,  // 선택 — 호스트 렌더 캐시 주입
  *     signal: abortCtrl.signal, // 선택 — 협조 취소 (페이지 단위 체크, abort 시 AbortError throw)
+ *     onDiagnostic: records => {}, // 선택 — PB-4A 구조화 관측 record 배열을 문서 끝에 1회 전달
+ *     cropImages: false,       // 선택 — v2.19.1+ 진단 전용. 크롭 생성·PNG 직렬화를 통째로 생략한다.
+ *                              //   크롭은 감지 이후 단계라 figures 출력은 완전히 동일하고, PNG 인코딩·
+ *                              //   전송·저장 비용만 사라진다. 이 모드에서는 cropDataURL/cropBlob 사용 불가.
  *   });
+ *   // throw: AbortError(취소) 외에 v2.19.1+ `FigRenderError` — 렌더 결과가 존재하지 않는 경우
+ *   //   (메모리 부족으로 Chrome이 캔버스 백킹 스토어를 회수). 엔진이 직접 렌더한 페이지의 불투명
+ *   //   픽셀이 절반 미만이거나 크롭 캔버스가 투명할 때 발화하며, 불투명 배경 불변식이 없는 호스트
+ *   //   주입 캔버스(renderPage)에는 적용하지 않는다. 조용히 빈 그림을 내놓는 대신 실패시킨다 —
+ *   //   일시적 조건이므로 호스트는 재시도를 제공하는 것이 적절하다.
  *   // result = { title, numPages, engineVersion, figures: [...], suspectedMissing: ["1", ...] }
- *   // figure = { num, page, confidence, caption, bboxPt(그림만), captionBoxPt, bboxPx, cropCanvas }
+ *   // figure = { num, page, confidence, caption, bboxPt(그림만), captionBoxPt, bboxPx }
  *   //   식별 키 = (num, page). 같은 num이 다른 페이지에 복수 등장 가능 (v2.5.0+ — 합본·부록 번호 재시작)
  *   // suspectedMissing = 감지된 정수 번호 1..최대 중 빠진 번호 (미탐지 의심 — 소비자가 무시해도 됨)
- *   // cropCanvas = 그림 영역만의 크롭 렌더 (scale 2.2). 페이지 전체 캔버스는 보관하지 않는다 (PDFViewer#12)
- *   //   — 소비자는 프리뷰 생성 후 cropCanvas 참조를 버려 메모리를 회수할 수 있다
- *   // 크롭 이미지: FigExtract.cropDataURL(fig) / FigExtract.cropBlob(fig)
+ *   // 크롭 이미지: FigExtract.cropDataURL(fig) / FigExtract.cropBlob(fig) — 그림 영역만 (scale 2.2)
+ *   //   v2.19.1+: 크롭은 스캔 중 PNG로 직렬화된다. `figure.cropCanvas` 필드와 `cropCanvas()` 접근자는
+ *   //   제거됐다 ([BREAKING]) — 소비자가 캔버스 수명을 관리할 필요가 없어졌다 (이전에는 프리뷰 생성 후
+ *   //   참조를 버리라고 요구했다). 페이지 캔버스도 스캔 중 동시 상주 최대 1장이고 즉시 반환된다.
  *   // 좌표: pt, 좌상단 원점. PDF user space 변환은 y' = pageHeight - y
  *
  * 알고리즘 설명과 각 규칙의 유래는 docs/ALGORITHM.md 참고.
@@ -31,7 +41,58 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.14.0";
+const VERSION = "2.19.4";
+// 2.19.1: [BREAKING] 죽은 캔버스 내성 (백로그 B7 — 전수 배치 비결정성의 근본 원인). Chrome은 메모리
+//        압력을 받으면 캔버스 백킹 스토어를 예외 없이 회수하는데, 회수된 캔버스는 모든 그리기가
+//        무성과로 끝나고 읽으면 전면 투명이다. makeInk가 알파를 무시해 이걸 "잉크 100% 페이지"로
+//        읽어 유령 figure 2건·bbox 44.5pt 이동을 만들었고, 크롭은 전량 백지 PNG로 저장됐다
+//        (v2.19.0 출하본에 23장 혼입). ① 잉크 판정을 흰 배경 합성으로 교정 — 불투명 픽셀은 합성식이
+//        항등이라 정상 렌더 출력은 완전 불변이다. ② 엔진이 직접 렌더한 페이지 캔버스의 불투명 픽셀이
+//        절반 미만이거나 크롭 캔버스가 투명하면 `FigRenderError`로 즉시 실패 (조용한 오염 방지). pdf.js가
+//        페이지를 불투명 흰색으로 채우고 시작하므로 정상 렌더의 기대 투명 비율은 0이고, 이 불변식이 없는
+//        호스트 주입 캔버스(`opts.renderPage`)에는 검사를 적용하지 않는다. ③ 크롭을 생성 즉시 PNG로 직렬화하고
+//        캔버스를 반환 — 문서 끝까지 캔버스를 쌓던 구조(논문당 최대 130MB)가 사라져 회수 자체가
+//        일어나지 않는다. `figure.cropCanvas` 필드와 `cropCanvas()` 접근자 제거([BREAKING]),
+//        `cropDataURL`/`cropBlob`은 시그니처 불변. ④ 진단 전용 `cropImages:false` 옵션(출력 불변).
+// 2.19.4: [수정] v2.19.2/.3 적대 리뷰 후속 — ① capLineNorm도 글리프를 벗겨 비교(안 그러면 글리프
+//        앵커의 bareLabel이 항상 false가 되어 down/side/12-B 증거 분기가 통째로 죽는다) ② 선두
+//        글리프가 독립 조각일 때 임베디드 캡션 분해가 무발동이던 게이트 수정 ③ 글리프 열거를 관측된
+//        좌향 2자로 축소(우향은 양성 증거 0, 유일 사례가 비-캡션 불릿) ④ 12-B 방출이 emittedNums를
+//        갱신하도록 수정(같은 num 두 앵커 통과 시 F8 중단이 문서 전체를 실패시켰다) ⑤ 장식 띠로
+//        거부된 후보도 dedup 레코드를 남겨 살아남은 후보의 sole-identity-candidate 거짓 사유 제거.
+// 2.19.3: [행동 변경] 지면 장식 띠 거부 — dedup **앞**에서 heightRatio < 0.05 ∧ widthRatio >= 0.80
+//        인 후보를 버린다(머리글 띠 오방출). dedup 뒤에 두면 띠가 우승한 뒤 죽고 진짜 후보는 이미
+//        버려져 복구 불가다. 12-B N−1 방출 경로에도 같은 바닥을 적용해 same-page에서 막은 띠가
+//        adjacent로 새어나가지 않게 한다.
+// 2.19.2: [행동 변경] 캡션 라벨 앞 삼각 글리프(◀◂◄▶▸►◁▹) 허용 — buildLines가 조판 장식을 캡션과
+//        같은 줄로 병합해 ^(Fig|Figure)가 깨지던 조판을 복구한다. hard·soft·자간분리 **세 판정 경로
+//        전부**에 같은 접두 제거를 적용하고, 길이 가드는 벗겨낸 문자열 기준으로 잰다. 원본 line.s는
+//        건드리지 않아 캡션 텍스트·박스 계산은 불변이다.
+// 2.19.0: [행동 변경] PB-4B 12-B — 캡션이 다음 장 상단에 있고 직전 페이지에 주인 없는 합성 영역이
+//        있을 때 그 페이지에 figure를 **신규 방출**한다(page = 실제 그림 페이지, captionPage optional).
+//        조건은 composition:confirmed ∧ unclaimed 3가드 ∧ 기존 방출 없음 ∧ 같은 num 미방출 ∧
+//        textCoverage ≤ 0.50 ∧ selectionAreaRatio ≥ 0.30(잠정). 기존 상자 replace는 12-C로 계속 잠금이며
+//        같은 num이 이미 있으면 fail-closed로 중단한다. 불통과는 abstain = 이전 동작.
+// 2.18.0: [계약 무변경] PB-4B 12-A strong 계측 — 선택 영역의 텍스트 점유율·면적·raster·잉크밀도를
+//        adjacent-observation.strongMetrics로 방출. strong tri-state는 null 유지, 임계 없음.
+// 2.17.0: [계약 무변경] PB-4B 12-A 관측 전용 기반. N−1 observer를 diagnostic callback과
+//        무관하게 항상 실행하고 기록만 optional로 분리해 graph off↔on이 같은 public 경로를 검증하게
+//        한다. 잔여 합집합(A)과 30pt seed 성장(B)의 합의는 새 composition tri-state로, target page의
+//        owned 교차·다른 num anchor·다른 adjacent selection 세 가드는 unclaimed 관측 필드로만 기록한다.
+//        기존 single은 region 정확히 1개라는 의미를 바꾸지 않고 null/deprecated로 동결한다. resolver,
+//        reassignment, public captionPage/page 변경은 없으며 suspectedMissing 계산만 observer 이후로 옮겼다.
+// 2.16.0: [계약 무변경] 중첩 라벨 계열 경합 — 한 물리 캡션 줄이 "Extended Data Fig. N | Figure SN. …"
+//        처럼 ED와 S 라벨을 함께 낳는 문서(저자 오제출 — Goldstein-2022)에서 임베디드 스플리터(v2.9.2)가
+//        같은 그림을 ED.N + 유령 S.N 둘로 방출하고, 형제 clamp가 ED.N 영역까지 축소했다. 줄의 identity
+//        (첫 라벨)가 ED면 같은 줄의 S 라벨은 형제 앵커로 만들지 않는다. 근거는 표기 관습이다 — 한 영역이
+//        동시에 Extended Data이면서 Supplementary일 수 없고, ED는 Nature 계열 전용이라 같은 문서가 같은
+//        그림에 S 번호를 겹쳐 붙이지 않는다. 겹침 임계 없이 "같은 물리 라인"이라는 사실만 쓴다. 형제가
+//        남지 않으면 분해 자체를 하지 않으므로 sibL/sibR clamp도 함께 사라진다(ED 영역 복원).
+// 2.15.0: [필드 추가: optional opts.onDiagnostic] PB-4A observation infrastructure. 명시적으로
+//        diagnostic callback을 준 실행에서만 anchor→candidate→selection→floor→dedup→emission의 scalar
+//        record를 문서 끝에 한 번 전달한다. canvas/PNG/raw pixel은 포함하지 않는다. callback 부재 시 recorder
+//        객체·record를 만들지 않는다. 공개 result/figure 필드, 선택/score/crop/dedup 동작은 2.14.0과 동일하다.
+//        batch-runner `--graph`가 별도 paper-local JSONL/meta로 영속화하며 `--one`은 graph를 자동 활성화하지 않는다.
 // 2.14.0: [계약 무변경] soft 캡션 문서 게이트 강건화 — 혼합-관습 문서에서 hard 앵커 1개가 같은 문서
 //        soft 캡션을 전량 몰살하던 문제 해결. 두 갈래. **Part1**: soft 게이트의 hard 카운트를 "sep-증거"로
 //        교정 — 구 hardCount(비-family 앵커를 sep·bare 무차별 1로 셈)를 hardBody = (비-family sep 앵커)
@@ -334,16 +395,32 @@ function matchCaption(s, compact) {
   return null;
 }
 
+/* 캡션 라벨 앞 삼각 글리프 (v2.19.2) — Nature Reviews "◀ Fig. 1 |", Springer "◂Fig. 5 …"처럼
+ * 조판 장식이 라벨 앞에 붙는 조판이 있다. buildLines가 이 글리프를 캡션과 **같은 줄로 병합**하므로
+ * (베이스라인 차 2.9pt < 허용치, x-갭 4.8pt < 8pt) `^(Fig|Figure)`가 깨져 앵커가 아예 생성되지 않는다.
+ * 판정 입력에서만 벗겨낸다 — line.s 원본은 그대로라 캡션 텍스트·박스 계산에 영향이 없다.
+ * ★ 코드포인트는 열거로 못 박는다: 전 코퍼스 330편에서 줄 시작 출현이 8건뿐이고 그중 figure 라벨을
+ *   끄는 것은 대상 4건이다(나머지는 글리프 단독 줄과 "►Additional supplemental" 1건). 오탐 표면 0.
+ * ★ 길이 가드(12/14자)는 **벗겨낸 문자열 기준**으로 잰다 — 글리프는 캡션 텍스트가 아니므로 예산을
+ *   먹지 않는다. 그 결과 "◀ Fig. 5"는 "Fig. 5"와 정확히 같게 판정된다. */
+/* v2.19.4: 열거를 **관측된 2자로 좁힌다**. 우향(▶▸►▹)은 캡션 접두로 관측된 적이 없고,
+ * 코퍼스의 유일한 우향 사례는 비-캡션 불릿("►Additional supplemental")이다 — SI 목록의
+ * "► Figure S1. …" 같은 불릿을 앵커로 만들 위험만 있고 얻는 것이 없다. 새 사례가 관측되면
+ * 그때 추가한다. */
+const CAPTION_LEAD_GLYPH_RE = /^[◀◂]\s*/;
+const captionTestText = s => s.replace(CAPTION_LEAD_GLYPH_RE, "");
+
 function isCaption(line) {
-  let match = matchCaption(line.s, false);
+  const text = captionTestText(line.s);
+  let match = matchCaption(text, false);
   if (!match) {
-    const stripped = line.s.replace(/\s+/g, "");
+    const stripped = text.replace(/\s+/g, "");
     match = matchCaption(stripped, true);
     if (!match) return null;
     if (![".", ":", "|"].includes(match.sep) && stripped.length - match.lead > 12) return null;
     return match.num;
   }
-  if (![".", ":", "|"].includes(match.sep) && line.s.length - match.lead > 14) return null;
+  if (![".", ":", "|"].includes(match.sep) && text.length - match.lead > 14) return null;
   return match.num;
 }
 
@@ -351,12 +428,15 @@ function isCaption(line) {
  * hard 구분자(. : |)는 항상, 무구분자(자간분리 "T A B L E N" 포함)는 짧을 때만 허용(isCaption 12/14자 가드).
  * 대문자 Table/TABLE만 매칭해 본문 "table 3. With longer ..." 소문자 상호참조를 배제한다. */
 function isTableCaption(line) {
-  let m = TABLE_CAP_RE.exec(line.s);
+  /* v2.19.2: figure 라벨에만 글리프를 관용하면 같은 조판의 "◀ Table 3."이 경계로 인식되지 않아
+   * 영역이 표를 넘어 자란다. 같은 규율을 적용한다. */
+  const text = captionTestText(line.s);
+  let m = TABLE_CAP_RE.exec(text);
   if (m) {
-    if (![".", ":", "|"].includes(m[2]) && line.s.length > 14) return false;
+    if (![".", ":", "|"].includes(m[2]) && text.length > 14) return false;
     return true;
   }
-  const stripped = line.s.replace(/\s+/g, "");
+  const stripped = text.replace(/\s+/g, "");
   m = TABLE_CAP_RE2.exec(stripped);
   if (m) {
     if (![".", ":", "|"].includes(m[2]) && stripped.length > 12) return false;
@@ -371,11 +451,15 @@ function isTableCaption(line) {
  * isCaption의 길이 가드(12/14자)는 soft 경로에 적용하지 않는다 — 그 자리를
  * SOFT_BODY_RE(본문 대문자 시작)와 SOFT_SPACED_RE(자간 분리 한정)가 대신한다. */
 function softCaptionOf(line) {
-  let m = SOFT_CAP_RE.exec(line.s);
+  /* v2.19.2: hard 경로(isCaption)와 **같은 접두 처리**를 여기에도 적용한다. soft는 matchCaption을
+   * 거치지 않고 자기 정규식을 raw line에 직접 들이대므로, isCaption만 고치면 Springer "◂Fig. 5 …"
+   * 같은 무구분자 조판은 후보조차 생기지 않는다(자간분리 경로도 선두 글리프에서 즉시 실패한다). */
+  const text = captionTestText(line.s);
+  let m = SOFT_CAP_RE.exec(text);
   if (m && SOFT_BODY_RE.test(m[3]))
     return { num: m[2].toUpperCase(), form: m[1].toLowerCase() };
-  if (!SOFT_SPACED_RE.test(line.s)) return null;
-  m = SOFT_CAP_RE2.exec(line.s.replace(/\s+/g, ""));
+  if (!SOFT_SPACED_RE.test(text)) return null;
+  m = SOFT_CAP_RE2.exec(text.replace(/\s+/g, ""));
   if (m && SOFT_BODY_RE2.test(m[3]))
     return { num: m[2].toUpperCase(), form: "spaced" };
   return null;
@@ -411,14 +495,18 @@ function captionAnchors(lines, dbg) {
   };
   const sameBaseline = (a, b) =>
     Math.abs(bottom(b) - bottom(a)) < Math.max(2, b.h * 0.45);
-  const hardPrefix = u => /^(?:figure|fig)\.?$/i.test(u.s.replace(/\s+/g, ""));
+  /* v2.19.2: stitch 선두 조각도 글리프를 벗기고 본다 ("◀ Fig." + 8pt 초과 갭 + "1 | Title"). */
+  const hardPrefix = u => /^(?:figure|fig)\.?$/i.test(captionTestText(u.s).replace(/\s+/g, ""));
 
   /* 기존 isCaption 결과는 clone하지 않고 동일 raw line 객체·순서로 보존한다. */
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i], num = isCaption(line);
     if (!num) continue;
-    let match = matchCaption(line.s, false);
-    if (!match) match = matchCaption(line.s.replace(/\s+/g, ""), true);
+    /* isCaption과 **같은 입력**으로 재조회해야 한다 — 여기서만 raw line을 쓰면 글리프 접두 라인의
+     * match가 null이 되어 hard 판정이 조용히 soft로 강등된다 (v2.19.2). */
+    const text = captionTestText(line.s);
+    let match = matchCaption(text, false);
+    if (!match) match = matchCaption(text.replace(/\s+/g, ""), true);
     slots[i] = line;
     ownerByPart.set(line, line);
     infoByAnchor.set(line, {
@@ -440,7 +528,9 @@ function captionAnchors(lines, dbg) {
    * buildLines의 8pt 분리 규칙 자체는 건드리지 않는다 (Aslin 유래 앵커 보호). */
   const embedded = new Map();
   const hardLabelOf = frag => {
-    const m = matchCaption(frag.s.trim(), false);
+    /* v2.19.2: 첫 조각에 글리프가 붙으면 형제 분해가 통째로 무발동이 된다
+     * ("◀Figure 14. … Figure 15. …"에서 Fig 15 이후가 조용히 소실). */
+    const m = matchCaption(captionTestText(frag.s.trim()), false);
     return m && [".", ":", "|"].includes(m.sep) ? m.num.toUpperCase() : null;
   };
   const joinFrags = fr => {
@@ -456,10 +546,34 @@ function captionAnchors(lines, dbg) {
     const labelIdx = [];
     for (let k = 0; k < line.frags.length; k++)
       if (hardLabelOf(line.frags[k])) labelIdx.push(k);
-    if (labelIdx.length < 2 || labelIdx[0] !== 0) continue;
+    /* 선두 조판 글리프가 **독립 조각**이면 첫 라벨 인덱스가 0이 아니게 되어 형제 분해가 통째로
+     * 무발동이 된다 (v2.19.4). 글리프만으로 이뤄진 선두 조각은 라벨 위치 계산에서 건너뛴다 —
+     * hardLabelOf에 글리프 관용을 넣는 것만으로는 이 게이트를 통과하지 못한다. */
+    let firstContentIdx = 0;
+    while (firstContentIdx < line.frags.length &&
+           captionTestText(line.frags[firstContentIdx].s).trim() === "") firstContentIdx++;
+    if (labelIdx.length < 2 || labelIdx[0] !== firstContentIdx) continue;
 
-    const segs = labelIdx.map((start, n) =>
-      line.frags.slice(start, n + 1 < labelIdx.length ? labelIdx[n + 1] : line.frags.length));
+    /* ★ 중첩 라벨 계열 경합 (v2.16.0) — 줄의 identity(첫 라벨)가 ED인데 같은 줄에 S 라벨이 섞여
+     * 있으면 그 S는 형제로 만들지 않는다. 한 영역이 동시에 Extended Data이면서 Supplementary일 수
+     * 없고, ED는 Nature 계열 전용 표기라 같은 문서가 같은 그림에 S 번호를 겹쳐 붙이지 않는다
+     * (Goldstein-2022은 저자가 옛 S 표기를 ED 캡션 본문에 남긴 오제출). 남는 라벨이 1개면 분해
+     * 자체를 하지 않으므로 loop-1의 ED 앵커가 그대로 줄을 소유하고 sibL/sibR clamp도 생기지 않는다.
+     * 겹침 임계나 기하는 쓰지 않는다 — 근거는 "같은 물리 캡션 라인"이라는 사실뿐이다. */
+    const famOf = k => {
+      const n = hardLabelOf(line.frags[k]);
+      return /^ED\./.test(n) ? "ED" : /^S\./.test(n) ? "S" : "other";
+    };
+    let keptIdx = labelIdx;
+    if (famOf(labelIdx[0]) === "ED" && labelIdx.some(k => famOf(k) === "S")) {
+      keptIdx = labelIdx.filter(k => famOf(k) !== "S");
+      if (dbg) dbg(`  [split] line T${line.top.toFixed(0)} ED>S suppress ` +
+        labelIdx.filter(k => famOf(k) === "S").map(k => hardLabelOf(line.frags[k])).join("/"));
+    }
+    if (keptIdx.length < 2) continue;
+
+    const segs = keptIdx.map((start, n) =>
+      line.frags.slice(start, n + 1 < keptIdx.length ? keptIdx[n + 1] : line.frags.length));
     const made = segs.map(fr => {
       const main = fr.reduce((a, b) => a.w >= b.w ? a : b);
       return { ...boxOf(fr), s: joinFrags(fr), font: main.font };
@@ -553,7 +667,10 @@ function captionAnchors(lines, dbg) {
    *   ⚠ bareForms는 bare 전용 multiset이다 — softSlots.form(승격 formCount)과 물리적으로 분리한다.
    *     고립 bare "Figure 7"(Hao)의 form이 soft 8앵커 form과 같은 키라 공유 맵이면 반복 오분류된다. */
   const bareFormOf = ln => {
-    const s = (ln.s || "").replace(/\s+/g, " ").trim();
+    /* v2.19.2: 여기서 글리프를 안 벗기면 "◂Fig. 5 …"가 form "spaced"로 **오분류**되어
+     * bareFormCount가 오염되고, 그 집계가 문서 전역 soft 체제(전량승격/애매역/전량기각)를
+     * 뒤집을 수 있다 — 파급이 그 라인 하나에 국한되지 않는 유일한 누락 지점이었다. */
+    const s = captionTestText((ln.s || "").replace(/\s+/g, " ").trim());
     return /^figure\b/i.test(s) ? "figure" : (/^fig\b|^fig\.?\d/i.test(s) ? "fig" : "spaced");
   };
   const bareForms = [];
@@ -581,7 +698,7 @@ function captionAnchors(lines, dbg) {
  * 경계 — 잠정승격 후 up-점수 floor로 진짜 캡션만 남긴다(구 게이트는 이 문서들의 soft를 전멸시켰다).
  * 승격 앵커는 hard:false·parts 1개로 기존 "구분자 없는 앵커"와 구조적으로 동일 → 후보 생성·채점·선택
  * 경로 불변. 애매역 앵커만 provisional:true로 표시해 pass2의 floor 검증 대상이 됨. */
-function promoteSoftAnchors(pageData, dbg) {
+function promoteSoftAnchors(pageData, dbg, diag) {
   let hardSepTotal = 0, softTotal = 0;
   const formCount = new Map();       // soft 라벨폼 (승격 form-rep 판정) — bare와 분리
   const bareFormCount = new Map();   // ★ bare 전용 multiset (문서-레벨 반복 판정, formCount와 disjoint)
@@ -603,13 +720,50 @@ function promoteSoftAnchors(pageData, dbg) {
   const bareInfo = [...bareFormCount].map(([f, n]) => `${f}:${n}`).join(",") || "-";
   const regime = hardBody === 0 ? "promote-all"
                : hardBody < SOFT_GATE_K ? "ambiguous" : "reject-all";
+  const recordRejectedSoft = diag ? ((pd, c, reason, repetitions) => {
+    const anchorId = `p${pd.num}/l${c.index}/e0`;
+    diag.add("anchor", {
+      anchorId, captionPage: pd.num, num: c.num,
+      numFamily: /^ED\./.test(String(c.num)) ? "extended-data"
+        : /^S\./.test(String(c.num)) ? "supplementary"
+        : /^[A-D]\./.test(String(c.num)) ? "appendix"
+        : /^\d/.test(String(c.num)) ? "main" : "roman-or-other",
+      sourceLineIndex: c.index, embeddedOrdinal: 0,
+      sourceText: String(c.line.s || "").replace(/\s+/g, " ").trim().slice(0, 180),
+      sourceTextHash: diag.textHash(c.line.s),
+      sourceParts: [{
+        index: 0, lineIndex: c.index, bboxPt: diag.boxPt(c.line),
+        textHash: diag.textHash(c.line.s),
+      }],
+      anchorBoxPt: diag.boxPt(c.line), labelBoxPt: diag.boxPt(c.line),
+      hard: false, soft: true, provisional: false, stitched: false, embedded: false,
+      active: false, form: c.form,
+    });
+    diag.add("anchor-gate", {
+      anchorId, captionPage: pd.num, num: c.num,
+      decision: "rejected", reasons: [reason], form: c.form, repetitions,
+    });
+  }) : null;
+  if (diag) diag.add("soft-gate", {
+    decision: regime,
+    hardBody,
+    hardSep: hardSepTotal,
+    bareRepeat: bareRep,
+    softTotal,
+    formCount: Object.fromEntries(formCount),
+    bareFormCount: Object.fromEntries(bareFormCount),
+  });
   dbg(`[doc] SOFT gate hardBody=${hardBody} (sep=${hardSepTotal} bareRep=${bareRep} bare=[${bareInfo}])` +
       ` soft=${softTotal} forms=${forms} regime=${regime}`);
   /* {2,3} 저-hardBody 기각은 현 코퍼스 공witness(공집합) — 혼합-관습 soft 문서가 여기 걸리면 침묵
    * 표적 손실이다. 전수 diff에서 표면화되도록 NOTE 방출(현재 미발동, 미래 대비 계측). */
   if (regime === "reject-all" && hardBody <= 3)
     dbg(`[doc] SOFT gate NOTE reject-all with low hardBody=${hardBody} — verify not a soft-target doc`);
-  if (regime === "reject-all") return;
+  if (regime === "reject-all") {
+    if (diag) for (const pd of pageData) for (const c of pd.captionData.softSlots)
+      recordRejectedSoft(pd, c, "soft-document-gate", formCount.get(c.form) || 0);
+    return;
+  }
   const provisional = regime === "ambiguous";
 
   for (const pd of pageData) {
@@ -619,6 +773,7 @@ function promoteSoftAnchors(pageData, dbg) {
       const reps = formCount.get(c.form);
       if (reps < SOFT_FORM_MIN) {
         dbg(`[doc] SOFT reject p${pd.num} num=${c.num} form=${c.form} reason=form-rep(${reps})`);
+        if (diag) recordRejectedSoft(pd, c, "soft-form-repetition", reps);
         continue;
       }
       cd.slots[c.index] = c.line;
@@ -634,6 +789,14 @@ function promoteSoftAnchors(pageData, dbg) {
         labelBox: { left: c.line.left, w: c.line.w, top: c.line.top, h: c.line.h }
       });
       promoted++;
+      if (diag) {
+        const anchorId = diag.registerAnchor(pd, c.line);
+        diag.add("anchor-gate", {
+          anchorId, captionPage: pd.num, num: c.num,
+          decision: provisional ? "provisional" : "promoted",
+          reasons: [regime], form: c.form, repetitions: reps,
+        });
+      }
       dbg(`[doc] SOFT ${provisional ? "provisional" : "promote"} p${pd.num} num=${c.num} form=${c.form}` +
           ` s=${JSON.stringify(c.line.s.slice(0, 50))}`);
     }
@@ -725,10 +888,14 @@ function subpanelStoppers(lines, stoppers, dom) {
 }
 
 /* ===================== 이미지 XObject bbox (CTM 추적) ===================== */
-async function getImageBoxes(page, pageH) {
+async function getImageBoxes(page, pageH, onError) {
   let opsList;
   try { opsList = await page.getOperatorList(); }
-  catch (e) { console.error("getOperatorList 실패:", e); return []; }
+  catch (e) {
+    console.error("getOperatorList 실패:", e);
+    if (onError) onError(e);
+    return [];
+  }
   const O = pdfjsLib.OPS, stack = [], boxes = [];
   let ctm = [1, 0, 0, 1, 0, 0];
   for (let i = 0; i < opsList.fnArray.length; i++) {
@@ -750,19 +917,327 @@ async function getImageBoxes(page, pageH) {
   return boxes;
 }
 
+/* 렌더 실패(죽은 캔버스) 전용 오류 — 소비자가 name으로 분기할 수 있게 별도 이름을 준다 (B7).
+ * Chrome은 메모리 압력을 받으면 캔버스 백킹 스토어를 예외 없이 회수한다. 회수된 캔버스는 모든
+ * 그리기 연산이 무성과로 끝나고 읽으면 전부 투명 검정이라, 아래 잉크 판정에 "잉크로 꽉 찬 페이지"로
+ * 보였다 — 유령 figure와 44.5pt bbox 이동의 원인이다. 조용한 오염보다 즉시 실패가 낫다. */
+function figRenderError(message) {
+  const error = new Error(message);
+  error.name = "FigRenderError";
+  return error;
+}
+const isFigRenderError = error => !!error && error.name === "FigRenderError";
+
 /* ===================== 잉크 그리드 (렌더 픽셀의 명암 이진화) ===================== */
-function makeInk(canvas) {
-  const ctx = canvas.getContext("2d");
-  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+/* 알파는 흰 배경 위 합성으로 처리한다 (B7) — 불투명 픽셀(α=255)은 합성식이 항등이라 판정이
+ * 완전히 불변이고, 칠해지지 않은 픽셀(α=0)만 흰색(= 여백)이 된다. */
+function makeInk(canvas, canary = true) {
   const W = canvas.width, H = canvas.height;
+  /* 0×0 캔버스는 getImageData가 IndexSizeError를 던진다. `canvas.width = 0`은 이 파일이 쓰는
+   * 백킹 스토어 반환 관용구이므로, 이미 해제된 캔버스를 넘겨받은 것으로 보고 죽은 캔버스와
+   * 같게 취급한다 — 안 그러면 일반 오류로 새어나가 adjacent 경로에서 조용히 삼켜진다.
+   * **카나리아와 같은 게이트를 쓴다**: 호스트 주입 캔버스까지 여기서 fail-fast시키면 관측
+   * 계층의 graceful degradation을 없애 문서 전체를 실패시킨다 (canary=false의 취지에 반한다). */
+  if (canary && (W <= 0 || H <= 0))
+    throw figRenderError(`페이지 캔버스가 해제돼 있습니다 (${W}×${H})`);
+  const ctx = canvas.getContext("2d");
+  const { data } = ctx.getImageData(0, 0, W, H);
   const ink = new Uint8Array(W * H);
+  let opaquePx = 0;
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    const l = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+    const a = data[i + 3];
+    let l = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+    if (a !== 255) { const k = a / 255; l = l * k + 255 * (1 - k); }
     if (l < 235) ink[p] = 1;
+    if (a !== 0) opaquePx++;
   }
+  /* 카나리아 — **엔진이 직접 렌더한 캔버스에서만** 켠다. pdf.js는 페이지 내용을 그리기 전에
+   * 캔버스를 불투명 흰색으로 채우므로 정상 렌더는 100% α=255다. 즉 투명 픽셀이 많다는 것은
+   * 백킹 스토어가 회수됐다는 뜻이다. 호스트 주입 캔버스(opts.renderPage)는 이 불변식이 없어
+   * (투명 배경으로 렌더하는 호스트가 정상일 수 있다) 호출부가 canary=false로 끈다.
+   *
+   * 전면(=0)이 아니라 비율로 보는 이유: Chromium은 렌더 도중에도 백킹 스토어를 버리고 다음
+   * 그리기에서 빈 버퍼를 재할당할 수 있어, 앞부분만 그려진 페이지가 나올 수 있다. 그 경우
+   * 위 합성이 투명 영역을 "흰 종이"로 읽어 **조용히** 틀린 검출을 낸다(알파 무시 시절에는
+   * 최소한 요란하게 틀렸다). 0.5는 잠정 문턱 — 정상 렌더의 기대 투명 비율이 0이라 여유가
+   * 극단적으로 크고, 전수 실행에서 발화 0건이면 그 자체가 문턱 검증이다. */
+  if (canary && opaquePx < 0.5 * W * H)
+    throw figRenderError(`페이지 렌더 결과가 비어 있습니다 (${W}×${H} 중 불투명 ${opaquePx}px — 메모리 부족으로 캔버스가 회수됐을 수 있습니다)`);
   return { ink, W, H };
 }
 const inkAt = (g, x, y) => (x >= 0 && y >= 0 && x < g.W && y < g.H) ? g.ink[y * g.W + x] : 0;
+
+/* PB-4A N−1 관측 primitive. 기존 up/down scan의 기계적 row noise floor와 4.8pt
+ * whitespace separator만 재사용한다. 이 함수들은 후보를 만들거나 점수/선택에 관여하지 않는다. */
+function adjacentInkBands(grid) {
+  const rowInk = new Int32Array(grid.H);
+  const threshold = Math.max(2, Math.floor(0.002 * grid.W));
+  for (let y = 0; y < grid.H; y++) {
+    let count = 0;
+    for (let x = 0; x < grid.W; x++) count += inkAt(grid, x, y);
+    rowInk[y] = count;
+  }
+  const separatorPx = Math.round(4.8 * S);
+  const bands = [];
+  let y = 0;
+  while (y < grid.H) {
+    while (y < grid.H && rowInk[y] <= threshold) y++;
+    if (y >= grid.H) break;
+    let y0 = y, y1 = y + 1, lastInk = y, gap = 0;
+    while (y < grid.H) {
+      if (rowInk[y] > threshold) {
+        lastInk = y;
+        gap = 0;
+      } else if (++gap >= separatorPx) {
+        break;
+      }
+      y++;
+    }
+    y1 = lastInk + 1;
+    /* 같은 vertical band 안에서도 separator 너비 이상의 실제 수평 whitespace로 분할한다.
+     * minX/maxX 하나로 축약하면 좌우 disjoint XObject를 빈 중앙 bbox가 bridge하는 오류가 난다. */
+    const colInk = new Int32Array(grid.W);
+    for (let yy = y0; yy < y1; yy++)
+      for (let x = 0; x < grid.W; x++) colInk[x] += inkAt(grid, x, yy);
+    let x = 0;
+    while (x < grid.W) {
+      while (x < grid.W && colInk[x] === 0) x++;
+      if (x >= grid.W) break;
+      let x0 = x, lastInkX = x, horizontalGap = 0;
+      while (x < grid.W) {
+        if (colInk[x] > 0) {
+          lastInkX = x;
+          horizontalGap = 0;
+        } else if (++horizontalGap >= separatorPx) {
+          break;
+        }
+        x++;
+      }
+      const x1 = lastInkX + 1;
+      let tightY0 = y1, tightY1 = y0, inkPixels = 0;
+      for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) {
+        if (!inkAt(grid, xx, yy)) continue;
+        tightY0 = Math.min(tightY0, yy);
+        tightY1 = Math.max(tightY1, yy + 1);
+        inkPixels++;
+      }
+      if (tightY1 > tightY0) bands.push({
+        kind: "ink-band", bboxPx: { x0, y0: tightY0, x1, y1: tightY1 },
+        rowStart: y0, rowEnd: y1, rowInkMax: Math.max(...rowInk.slice(y0, y1)),
+        inkPixels, inkDensity: inkPixels / Math.max(1, (x1 - x0) * (tightY1 - tightY0)),
+        threshold, separatorPx,
+      });
+      x = Math.max(x + 1, x1);
+    }
+    y = Math.max(y + 1, y1);
+  }
+  return bands;
+}
+
+const adjacentIntersection = (a, b) => {
+  const w = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+  const h = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+  return w * h;
+};
+const adjacentArea = box => Math.max(0, box.x1 - box.x0) * Math.max(0, box.y1 - box.y0);
+const adjacentPxBoxToPt = box => ({
+  x0: box.x0 / S, y0: box.y0 / S, x1: box.x1 / S, y1: box.y1 / S,
+});
+
+function adjacentRegions(seeds) {
+  const parent = seeds.map((_, i) => i);
+  const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
+  const join = (a, b) => {
+    a = find(a); b = find(b);
+    if (a !== b) parent[Math.max(a, b)] = Math.min(a, b);
+  };
+  for (let i = 0; i < seeds.length; i++)
+    for (let j = i + 1; j < seeds.length; j++)
+      if (adjacentIntersection(seeds[i].bboxPx, seeds[j].bboxPx) > 0) join(i, j);
+  const groups = new Map();
+  for (let i = 0; i < seeds.length; i++) {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(seeds[i]);
+  }
+  return [...groups.values()].map(group => {
+    const bboxPx = {
+      x0: Math.min(...group.map(seed => seed.bboxPx.x0)),
+      y0: Math.min(...group.map(seed => seed.bboxPx.y0)),
+      x1: Math.max(...group.map(seed => seed.bboxPx.x1)),
+      y1: Math.max(...group.map(seed => seed.bboxPx.y1)),
+    };
+    return {
+      seeds: group,
+      bboxPx,
+      sourceKinds: [...new Set(group.map(seed => seed.kind))].sort(),
+    };
+  }).sort((a, b) => a.bboxPx.y0 - b.bboxPx.y0 || a.bboxPx.x0 - b.bboxPx.x0 ||
+    a.bboxPx.y1 - b.bboxPx.y1 || a.bboxPx.x1 - b.bboxPx.x1);
+}
+
+/* ===================== PB-4A 구조화 관측 (output-neutral) =====================
+ * callback이 없으면 null을 반환하고 아래 모든 callsite가 건너뛴다. ID는 물리 source slot/pass/direction/
+ * seed ordinal만 사용해 bbox·raster AA·worker/runtime이 topology identity를 바꾸지 않게 한다. */
+const diagnosticTextHash = text => {
+  let h = 0x811c9dc5;
+  for (const ch of String(text || "").replace(/\s+/g, " ").trim()) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+};
+
+function makeDiagnosticRecorder(callback) {
+  if (typeof callback !== "function") return null;
+  const records = [];
+  const anchorIds = new WeakMap(), candidateMeta = new WeakMap(), figCandidateIds = new WeakMap();
+  const candidateAnchorById = new Map(), selectionByAnchor = new Map();
+  const emissionByCandidate = new Map(), claimByCandidate = new Map();
+  const finite = value => {
+    if (typeof value !== "number") return value;
+    if (Number.isNaN(value)) return "nan";
+    if (value === Infinity) return "inf";
+    if (value === -Infinity) return "-inf";
+    if (Object.is(value, -0)) return 0;
+    return Math.round(value * 1e6) / 1e6;
+  };
+  const scalar = value => {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number") return finite(value);
+    if (value === undefined) return undefined;
+    if (Array.isArray(value)) return value.map(v => scalar(v));
+    const out = {};
+    for (const key of Object.keys(value).sort()) {
+      const v = scalar(value[key]);
+      if (v !== undefined) out[key] = v;
+    }
+    return out;
+  };
+  const textHash = diagnosticTextHash;
+  const boxPt = box => box ? {
+    x0: box.x0 ?? box.left,
+    y0: box.y0 ?? box.top,
+    x1: box.x1 ?? ((box.left ?? 0) + (box.w ?? 0)),
+    y1: box.y1 ?? ((box.top ?? 0) + (box.h ?? 0)),
+  } : null;
+  const pxBoxToPt = box => box ? {
+    x0: box.x0 / S, y0: box.y0 / S, x1: box.x1 / S, y1: box.y1 / S,
+  } : null;
+  const add = (record, data = {}) => {
+    const normalized = scalar({ seq: records.length, record, ...data });
+    records.push(normalized);
+    if (record === "candidate" && normalized.candidateId && normalized.anchorId)
+      candidateAnchorById.set(normalized.candidateId, normalized.anchorId);
+    else if (record === "selection" && normalized.anchorId)
+      selectionByAnchor.set(normalized.anchorId, normalized);
+    else if (record === "emission" && normalized.candidateId)
+      emissionByCandidate.set(normalized.candidateId, normalized);
+    else if (record === "claim" && normalized.candidateId)
+      claimByCandidate.set(normalized.candidateId, normalized);
+  };
+  const family = num => /^ED\./.test(String(num)) ? "extended-data"
+    : /^S\./.test(String(num)) ? "supplementary"
+    : /^[A-D]\./.test(String(num)) ? "appendix"
+    : /^\d/.test(String(num)) ? "main" : "roman-or-other";
+  const registerAnchor = (pd, cap) => {
+    if (anchorIds.has(cap)) return anchorIds.get(cap);
+    const cd = pd.captionData, info = cd.infoByAnchor.get(cap);
+    let slot = -1, embeddedOrdinal = 0;
+    for (let i = 0; i < cd.slots.length; i++) {
+      if (cd.slots[i] === cap) { slot = i; break; }
+      const embedded = cd.embedded.get(i) || [];
+      const ei = embedded.indexOf(cap);
+      if (ei >= 0) { slot = i; embeddedOrdinal = ei + 1; break; }
+    }
+    if (slot < 0 && info && info.parts && info.parts.length)
+      slot = pd.lines.indexOf(info.parts[0]);
+    if (slot < 0)
+      throw new Error(`diagnostic anchor source slot을 찾지 못했습니다 (p${pd.num}).`);
+    const id = `p${pd.num}/l${slot}/e${embeddedOrdinal}`;
+    anchorIds.set(cap, id);
+    const sourceText = (info && info.parts ? info.parts : [cap])
+      .map(line => line.s || "").join(" ").replace(/\s+/g, " ").trim();
+    add("anchor", {
+      anchorId: id,
+      captionPage: pd.num,
+      num: info && info.num,
+      numFamily: family(info && info.num),
+      sourceLineIndex: slot,
+      embeddedOrdinal,
+      sourceText: sourceText.slice(0, 180),
+      sourceTextHash: textHash(sourceText),
+      sourceParts: (info && info.parts ? info.parts : [cap]).map((line, index) => ({
+        index, lineIndex: pd.lines.indexOf(line), bboxPt: boxPt(line), textHash: textHash(line.s),
+      })),
+      anchorBoxPt: boxPt(cap),
+      labelBoxPt: boxPt(info && info.labelBox),
+      hard: !!(info && info.hard),
+      soft: !!(info && info.soft),
+      provisional: !!(info && info.provisional),
+      stitched: !!(info && info.stitched),
+      embedded: !!(info && info.embedded),
+      form: info && info.form,
+    });
+    return id;
+  };
+  const registerCandidate = (candidate, meta) => {
+    const candidateId = `${meta.anchorId}/pass${meta.pass}/${meta.direction}/` +
+      `${meta.seedSource || "none"}/${meta.seedOrdinal || 0}`;
+    const full = { ...meta, candidateId };
+    candidateMeta.set(candidate, full);
+    if (candidate && candidate.fig) figCandidateIds.set(candidate.fig, candidateId);
+    return candidateId;
+  };
+  const candidateId = candidate => candidate && candidateMeta.get(candidate)?.candidateId || null;
+  const figCandidateId = fig => fig && figCandidateIds.get(fig) || null;
+  const emitCandidate = (candidate, extra = {}) => {
+    const meta = candidateMeta.get(candidate);
+    if (!meta) throw new Error("diagnostic candidate metadata가 없습니다.");
+    const fig = candidate.fig || null;
+    add("candidate", {
+      ...meta,
+      valid: !!candidate.valid,
+      rejectReason: candidate.rejectReason || null,
+      reasons: candidate.rejectReason ? candidate.rejectReason.split(",").filter(Boolean) : [],
+      regionBoxPx: meta.regionBoxPx || null,
+      regionBoxPt: pxBoxToPt(meta.regionBoxPx),
+      outputBoxPx: fig ? { x0: fig.x0, y0: fig.y0, x1: fig.x1, y1: fig.y1 } : null,
+      outputBoxPt: fig ? pxBoxToPt({ x0: fig.x0, y0: fig.y0, x1: fig.x1, y1: fig.y1 }) : null,
+      metrics: candidate.metrics || null,
+      score: candidate.score || null,
+      ...extra,
+    });
+  };
+  const anchorState = anchorId => {
+    const selection = selectionByAnchor.get(anchorId) || null;
+    const candidateId = selection && selection.chosenCandidateId || null;
+    const emission = candidateId ? emissionByCandidate.get(candidateId) || null : null;
+    const claim = candidateId ? claimByCandidate.get(candidateId) || null : null;
+    return scalar({
+      chosenCandidateId: candidateId,
+      chosenDirection: selection && selection.chosenDirection || null,
+      selection: selection && selection.decision || "none",
+      emission: emission && emission.decision || "none",
+      claim: claim && claim.decision || "none",
+    });
+  };
+  const ownedClaims = () => [...claimByCandidate.entries()]
+    .filter(([, claim]) => claim.decision === "owned")
+    .map(([candidateId, claim]) => scalar({
+      candidateId,
+      anchorId: candidateAnchorById.get(candidateId) || null,
+      num: claim.num,
+      page: claim.page,
+      outputBoxPx: claim.outputBoxPx,
+      outputBoxPt: claim.outputBoxPt,
+    }));
+  return {
+    add, boxPt, pxBoxToPt, scalar, textHash, registerAnchor, registerCandidate, emitCandidate,
+    candidateId, figCandidateId, anchorState, ownedClaims,
+    finish: () => callback(records),
+  };
+}
 
 /* 방향별 후보가 공유하는 순수 채점기. 후보 생성기(up/down, Phase 2: left/right)는
    평범한 수치 지표만 이 함수에 넘기고, 선택기는 동일 점수축으로 비교한다. */
@@ -825,9 +1300,12 @@ function chooseCandidate(up, alternatives, policy) {
 }
 
 /* ===================== 페이지 단위 감지 (핵심) ===================== */
-function detectPage(pg, lines, dom, grid, dbg, captionData) {
+function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
   const figs = [];
   const { anchors: caps, ownerByPart, infoByAnchor } = captionData;
+  if (diag) diag.add("detection-pass", {
+    page: pg.num, pass, decision: "started", anchorCount: caps.length,
+  });
   const otherCaps = (blockLines, cap) => [...new Set(blockLines
     .map(u => ownerByPart.get(u)).filter(owner => owner && owner !== cap))];
   // stopper: 도달하면 figure 영역 상한으로 간주하는 "본문 줄"
@@ -848,6 +1326,13 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     dbg(`  tables=${tableStop.size} ${[...tableStop].slice(0, 4).map(u => JSON.stringify(u.s.slice(0, 22))).join(" ")}`);
   for (const cap of caps) {
     const capInfo = infoByAnchor.get(cap);
+    const anchorId = diag ? diag.registerAnchor(pg, cap) : null;
+    /* PB-4B observer가 graph 유무와 무관하게 같은 lifecycle을 보도록 public output과 분리한 내부
+     * scalar 상태다. detectPage 재실행 때마다 초기화되어 active floor pass만 남는다. */
+    capInfo.adjacentState_ = {
+      selection: "none", chosenDirection: null, selectedFig: null,
+      emission: "none", claim: "none",
+    };
     capInfo.upScore_ = undefined;   // 매 앵커 초기화 (v2.14.0) — legacyBelow continue가 아래 갱신을 건너뛰어도
                                     // 이전 detectPage 재실행의 값이 남지 않게 (soft floor 판정 오염 방지)
     const num = capInfo.num;
@@ -864,7 +1349,9 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         `${capInfo.sibR == null ? "-" : capInfo.sibR.toFixed(0)}] text=${JSON.stringify(cap.s.slice(0, 50))}`);
     /* 1) 캡션 블록 확장 (여러 줄 캡션 흡수) + 캡션 전체 텍스트 수집 */
     let capBottom = cap.top + cap.h, colL = cap.left, colR = cap.left + cap.w;
-    let capText = cap.s;
+    /* 방출 caption 문자열에서도 선두 글리프를 벗긴다 (v2.19.2) — 조판 장식이지 캡션 텍스트가
+     * 아니다. 상자(captionBox)는 원본 라인 기하 그대로라 영향이 없다. */
+    let capText = captionTestText(cap.s);
     const ownCaptionLines = new Set(capInfo.parts);
     for (const u of [...lines].sort((a, b) => a.top - b.top)) {
       if (ownerByPart.has(u)) continue;
@@ -880,6 +1367,75 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     }
     const capbox = { left: colL, w: colR - colL, top: cap.top };
     const captionBox = { x0: colL, y0: cap.top, x1: colR, y1: capBottom }; // pt, 좌상단 원점
+    /* 12-B N−1 방출이 caption page 좌표계의 캡션 텍스트·박스를 그대로 재사용하도록 보존한다.
+     * public output에는 나가지 않는 내부 필드다 (v2.19.0). */
+    capInfo.captionTextObserved_ = capText;
+    capInfo.captionBoxObserved_ = captionBox;
+    if (diag) diag.add("anchor-evaluation", {
+      anchorId, captionPage: pg.num, candidatePage: pg.num, pass, num,
+      decision: "evaluated", anchorBoxPt: diag.boxPt(cap),
+      captionBoxPt: captionBox,
+      captionTextHash: diag.textHash(capText),
+      captionParts: [...ownCaptionLines]
+        .map(line => ({
+          lineIndex: lines.indexOf(line), bboxPt: diag.boxPt(line),
+          textHash: diag.textHash(line.s),
+        }))
+        .sort((a, b) => a.lineIndex - b.lineIndex),
+      edgeDistancePt: {
+        top: captionBox.y0,
+        right: pg.w - captionBox.x1,
+        bottom: pg.h - captionBox.y1,
+        left: captionBox.x0,
+      },
+    });
+    const diagnosticAttempt = (direction, seedSource, seedOrdinal, decision, reasons, extra = {}) => {
+      if (!diag) return;
+      diag.add("candidate-attempt", {
+        anchorId, captionPage: pg.num, candidatePage: pg.num, pass, num,
+        direction, seedSource: seedSource || "none", seedOrdinal: seedOrdinal || 0,
+        decision, reasons, ...extra,
+      });
+    };
+    const registerDiagnosticCandidate = (candidate, direction, seedSource, seedOrdinal, regionBoxPx,
+      extra = {}) => {
+      if (!diag) return null;
+      const regionArea = regionBoxPx
+        ? Math.max(0, regionBoxPx.x1 - regionBoxPx.x0) * Math.max(0, regionBoxPx.y1 - regionBoxPx.y0)
+        : 0;
+      let imageIntersectionPx2 = 0;
+      const imageRefs = [];
+      if (regionBoxPx) for (let imageIndex = 0; imageIndex < pg.images.length; imageIndex++) {
+        const im = pg.images[imageIndex];
+        const imageBoxPx = {
+          x0: im.left * S, y0: im.top * S,
+          x1: (im.left + im.w) * S, y1: (im.top + im.h) * S,
+        };
+        const ix = Math.max(0, Math.min(regionBoxPx.x1, imageBoxPx.x1)
+          - Math.max(regionBoxPx.x0, imageBoxPx.x0));
+        const iy = Math.max(0, Math.min(regionBoxPx.y1, imageBoxPx.y1)
+          - Math.max(regionBoxPx.y0, imageBoxPx.y0));
+        const intersectionPx2 = ix * iy;
+        if (!intersectionPx2) continue;
+        const imageArea = Math.max(0, imageBoxPx.x1 - imageBoxPx.x0)
+          * Math.max(0, imageBoxPx.y1 - imageBoxPx.y0);
+        imageIntersectionPx2 += intersectionPx2;
+        imageRefs.push({
+          imageId: `p${pg.num}/image${imageIndex}`,
+          bboxPt: { x0: im.left, y0: im.top, x1: im.left + im.w, y1: im.top + im.h },
+          intersectionPx2,
+          regionCoverage: regionArea > 0 ? intersectionPx2 / regionArea : 0,
+          imageContainment: imageArea > 0 ? intersectionPx2 / imageArea : 0,
+        });
+      }
+      return diag.registerCandidate(candidate, {
+        anchorId, captionPage: pg.num, candidatePage: pg.num, pass, num,
+        direction, seedSource: seedSource || "none", seedOrdinal: seedOrdinal || 0,
+        regionBoxPx, imageRefs,
+        imageCoverage: regionArea > 0 ? Math.min(1, imageIntersectionPx2 / regionArea) : 0,
+        ...extra,
+      });
+    };
 
     /* 2) 예비 상한: stopper 스캔 (x-확장 판단용) */
     let yPre = 40;
@@ -1153,7 +1709,11 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
 
     const downStart = Math.max(0, Math.round(capBottom * S) + 2);
     const capNorm = capText.replace(/\s+/g, " ").trim();
-    const capLineNorm = cap.s.replace(/\s+/g, " ").trim();
+    /* ★ 양쪽 모두 글리프를 벗긴 값으로 비교해야 한다 (v2.19.4). capText만 벗기고 cap.s를 raw로
+     * 두면 글리프 앵커는 두 문자열이 정의상 달라 bareLabel이 **항상 false**가 되고, 거기 매달린
+     * empty·bareDown·huge·otherCap·suspect·healthyBareUp·adjacentEvidence 분기가 통째로 죽는다
+     * — "글리프 유무와 무관하게 같게 판정된다"는 v2.19.2의 계약이 여기서 깨졌었다. */
+    const capLineNorm = captionTestText(cap.s).replace(/\s+/g, " ").trim();
     const bareLabel = capNorm === capLineNorm && capNorm.length <= 16 &&
       capBottom - cap.top <= Math.max(cap.h * 1.4, cap.h + 2);
 
@@ -1445,7 +2005,13 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         ` x=[${seed.bx0.toFixed(0)},${seed.bx1.toFixed(0)}]` +
         ` start=${downStart} capBottom=${capBottom.toFixed(1)}pt`);
       const down = scanDown(seed.bx0, seed.bx1, strictProseTail);
-      if (!down.incl.length) return null;
+      if (!down.incl.length) {
+        diagnosticAttempt("down", seed.source, index, "not-generated", ["no-block"], {
+          seedBoxPt: { x0: seed.bx0, y0: capBottom, x1: seed.bx1, y1: capBottom },
+          stopReason: down.stopReason,
+        });
+        return null;
+      }
       const ry0 = down.incl[0][0], ry1 = down.incl[down.incl.length - 1][1];
       const raster = down.incl.some(([a, b]) => hasImageIn(a, b, seed.bx0, seed.bx1));
       /* 방향별 후보 생성기는 달라도 공통 figureScore/선택기로 합류한다. 좌/우는 Phase 2. */
@@ -1516,7 +2082,7 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       const valid = seedGapPt <= 14 && metrics.widthRatio >= 0.15 && metrics.heightPt >= 24 &&
         metrics.areaRatio >= 0.008 && metrics.inkDensity >= 0.002 &&
         metrics.areaRatio <= 0.65 && metrics.heightRatio <= 0.82 && metrics.bodyStops <= 1;
-      return {
+      const candidate = {
         direction: "down",
         seedSource: seed.source,
         valid,
@@ -1527,6 +2093,25 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         metrics,
         score: figureScore(metrics)
       };
+      if (diag) {
+        const reasons = [];
+        if (seedGapPt > 14) reasons.push("gap");
+        if (metrics.widthRatio < 0.15) reasons.push("thin-width");
+        if (metrics.heightPt < 24) reasons.push("short-height");
+        if (metrics.areaRatio < 0.008) reasons.push("small-area");
+        if (metrics.inkDensity < 0.002) reasons.push("sparse");
+        if (metrics.areaRatio > 0.65 || metrics.heightRatio > 0.82) reasons.push("huge");
+        if (metrics.bodyStops > 1) reasons.push("body");
+        candidate.diagReasons_ = reasons;
+        registerDiagnosticCandidate(candidate, "down", seed.source, index,
+          { x0: fx0, y0: ry0, x1: fx1, y1: ry1 }, {
+            seedBoxPt: {
+              x0: seed.bx0, y0: capBottom,
+              x1: seed.bx1, y1: Math.min(pg.h, capBottom + 48),
+            },
+          });
+      }
+      return candidate;
     };
 
     const SIDE_MAX_GAP_PT = 36;
@@ -1564,6 +2149,12 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     const sideSeedBounds = direction => {
       if (!sideDirectionAllowed(direction)) {
         dbg(`  Fig${num}: ${direction.toUpperCase()} REJECT side-facing`);
+        diagnosticAttempt(direction, "none", 0, "not-generated", ["side-facing"], {
+          sideAnchor: {
+            leftPt: sideColumnLeftPt, rightPt: sideColumnRightPt,
+            widthPt: sideColumnWidthPt, centerRatio: sideColumnCenterPt / pg.w,
+          },
+        });
         return [];
       }
       const leftward = direction === "left";
@@ -1822,6 +2413,11 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         ` ${seed.source} y=[${seed.by0.toFixed(0)},${seed.by1.toFixed(0)}]` +
         ` gap=${gapText}pt`);
       if (side.gapPt > sideGapLimitPt || !side.incl.length) {
+        diagnosticAttempt(direction, seed.source, index, "not-generated",
+          [!side.incl.length ? "no-block" : "gap"], {
+            gapPt: side.gapPt, stopReason: side.stopReason,
+            seedBoxPt: { x0: seed.edgePt, y0: seed.by0, x1: seed.edgePt, y1: seed.by1 },
+          });
         dbg(`  Fig${num}: ${direction.toUpperCase()} REJECT ` +
           (!side.incl.length ? "no-block" : "gap"));
         return null;
@@ -1831,7 +2427,10 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       let fx1 = Math.max(...side.incl.map(b => b.x1));
       if (direction === "left") fx1 = Math.min(fx1, side.edgePx - 1);
       else fx0 = Math.max(fx0, side.edgePx + 1);
-      if (fx1 <= fx0) return null;
+      if (fx1 <= fx0) {
+        diagnosticAttempt(direction, seed.source, index, "not-generated", ["empty-width"]);
+        return null;
+      }
 
       const rowHasInk = y => {
         for (let x = Math.max(0, Math.ceil(fx0));
@@ -1846,7 +2445,10 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       const seedInkRows = [];
       for (let y = verticalSeedY0; y <= verticalSeedY1; y++)
         if (rowHasInk(y)) seedInkRows.push(y);
-      if (!seedInkRows.length) return null;
+      if (!seedInkRows.length) {
+        diagnosticAttempt(direction, seed.source, index, "not-generated", ["seed-no-ink"]);
+        return null;
+      }
 
       const sideBoxPt = { left: fx0 / S, w: (fx1 - fx0) / S };
       const xobjectProtects = u => seed.source === "image" && pg.images.some(im => {
@@ -1887,7 +2489,10 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         y++;
       }
       fy1 = lastInk;
-      if (fy1 <= fy0) return null;
+      if (fy1 <= fy0) {
+        diagnosticAttempt(direction, seed.source, index, "not-generated", ["empty-height"]);
+        return null;
+      }
 
       const outsideSeedStops = lines.filter(u => {
         if (!stoppers.has(u) || ownerByPart.get(u) === cap || ownCaptionLines.has(u) ||
@@ -1924,18 +2529,28 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       let outX0 = Math.max(0, fx0 - 10), outX1 = Math.min(grid.W, fx1 + 10);
       if (direction === "left") outX1 = Math.min(outX1, side.edgePx - 1);
       else outX0 = Math.max(outX0, side.edgePx + 1);
-      if (outX1 <= outX0) return null;
+      if (outX1 <= outX0) {
+        diagnosticAttempt(direction, seed.source, index, "not-generated", ["clamped-empty"]);
+        return null;
+      }
       const outY0 = Math.max(0, fy0 - 8), outY1 = Math.min(grid.H, fy1 + 4);
-      return { direction, seedSource: seed.source, anchorOverlap,
+      const candidate = { direction, seedSource: seed.source, anchorOverlap,
         rejectReason: reject.join(","), valid,
         fig: { num, raster_: raster, page: pg.num,
           x0: outX0, x1: outX1,
           y0: outY0, y1: outY1,
           h_: Math.round(outY1 - outY0), caption: capText, captionBox },
         metrics, score: figureScore(metrics) };
+      registerDiagnosticCandidate(candidate, direction, seed.source, index,
+        { x0: fx0, y0: fy0, x1: fx1, y1: fy1 }, {
+          seedBoxPt: direction === "left"
+            ? { x0: 0, y0: seed.by0, x1: seed.edgePt, y1: seed.by1 }
+            : { x0: seed.edgePt, y0: seed.by0, x1: pg.w, y1: seed.by1 },
+        });
+      return candidate;
     };
 
-    let upCandidate = null, legacyBelowCandidate = null;
+    let upCandidate = null, legacyBelowCandidate = null, legacyDiagnosticCandidate = null;
 
     if (incl.length) {
       const ry0 = incl[incl.length - 1][0], ry1 = incl[0][1];
@@ -2000,13 +2615,23 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
        * 분리돼 fx가 형제 캡션을 안 넘어 crossing guard에서 자연 배제된다. pdf2.0 6/7·Structural 5/10.
        * (baseline이 어긋난 나란한 형제(Dong 3@p6)는 여기서 안 잡히고 페이지 말미 offset 후처리가 담당.) */
       const capBaseY = cap.top + cap.h / 2, capRpt = capbox.left + capbox.w;
+      const sameBaselineClamps = diag ? [] : null;
       for (const oc of caps) {
         if (oc === cap || Math.abs((oc.top + oc.h / 2) - capBaseY) > SAME_BASELINE_PT) continue;
         const ocL = oc.left, ocR = oc.left + oc.w;
+        const before = diag ? { x0: fx0, y0: ry0, x1: fx1, y1: ry1 } : null;
         if (ocL > capRpt) {                                  // 형제가 우측 컬럼
           if (fx1 > ocL * S) fx1 = Math.min(fx1, Math.round((capRpt + SIBLING_COL_MARGIN) * S));
         } else if (ocR < capbox.left) {                      // 형제가 좌측 컬럼
           if (fx0 < ocR * S) fx0 = Math.max(fx0, Math.round((capbox.left - SIBLING_COL_MARGIN) * S));
+        }
+        if (diag && (before.x0 !== fx0 || before.x1 !== fx1)) {
+          sameBaselineClamps.push({
+            counterpartAnchorId: diag.registerAnchor(pg, oc),
+            counterpartNum: infoByAnchor.get(oc)?.num,
+            beforeBoxPx: before,
+            afterBoxPx: { x0: fx0, y0: ry0, x1: fx1, y1: ry1 },
+          });
         }
       }
       dbg(`  Fig${num}: REGION y[${ry0}-${ry1}] x[${fx0}-${fx1}]${raster ? " raster" : ""}`);
@@ -2022,7 +2647,21 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
         metrics,
         score: figureScore(metrics)
       };
+      const upCandidateId = registerDiagnosticCandidate(upCandidate, "up", "scan", 0,
+        { x0: fx0, y0: ry0, x1: fx1, y1: ry1 }, { seedBoxPt: null });
+      if (diag) for (const clamp of sameBaselineClamps) diag.add("relation", {
+        page: pg.num, pass, decision: "clamp",
+        claimantCandidateId: upCandidateId,
+        counterpartAnchorId: clamp.counterpartAnchorId,
+        claimantNum: num, counterpartNum: clamp.counterpartNum,
+        nums: [num, clamp.counterpartNum],
+        beforeBoxPx: clamp.beforeBoxPx, afterBoxPx: clamp.afterBoxPx,
+        reasons: ["same-baseline-sibling-column"],
+      });
     } else {
+      diagnosticAttempt("up", "scan", 0, "not-generated", ["no-block"], {
+        stopReason: upStopReason,
+      });
       /* caption-above 레이아웃: 아래쪽 이미지 */
       const below = pg.images.filter(im =>
         im.top >= capBottom - 4 && im.top - capBottom < 40 &&
@@ -2035,6 +2674,19 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
           x0: Math.round(bx0*S) - 10, x1: Math.round(bx1*S) + 10,
           y0: Math.round(capBottom*S) + 2, y1: Math.round(yb*S) + 4,
           h_: Math.round((yb - cap.top)*S), caption: capText, captionBox };
+        if (diag) {
+          legacyDiagnosticCandidate = {
+            direction: "down", seedSource: "legacy-image", valid: true,
+            fig: legacyBelowCandidate, metrics: null, score: null,
+          };
+          registerDiagnosticCandidate(legacyDiagnosticCandidate, "down", "legacy-image", 0,
+            { x0: Math.round(bx0 * S), y0: Math.round(capBottom * S),
+              x1: Math.round(bx1 * S), y1: Math.round(yb * S) }, {
+              seedBoxPt: { x0: bx0, y0: capBottom, x1: bx1, y1: yb },
+            });
+        }
+      } else {
+        diagnosticAttempt("down", "legacy-image", 0, "not-generated", ["no-nearby-image"]);
       }
     }
 
@@ -2071,10 +2723,27 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
 
     if (legacyBelowCandidate) {
       /* 기존 이미지 전용 폴백은 산출을 byte-for-byte 보존한다. */
+      if (diag && legacyDiagnosticCandidate) {
+        diagnosticAttempt("left", "none", 0, "not-evaluated", ["legacy-image-bypass"]);
+        diagnosticAttempt("right", "none", 0, "not-evaluated", ["legacy-image-bypass"]);
+        diag.emitCandidate(legacyDiagnosticCandidate, {
+          decision: "chosen", reasons: ["legacy-image-bypass"],
+        });
+        diag.add("selection", {
+          anchorId, captionPage: pg.num, candidatePage: pg.num, pass, num,
+          decision: "legacy", consideredCandidateIds: [diag.candidateId(legacyDiagnosticCandidate)],
+          chosenCandidateId: diag.candidateId(legacyDiagnosticCandidate),
+          reasons: ["legacy-image-bypass"],
+        });
+      }
       dbg(scoreText("up", upCandidate));
       dbg(`  Fig${num}: SCORE down legacy-image`);
       dbg(`  Fig${num}: CHOSE down legacy-image`);
       legacyBelowCandidate._anchor = cap;   // soft floor 판정이 이 앵커의 자기 fig를 식별 (v2.14.0)
+      capInfo.adjacentState_ = {
+        selection: "legacy", chosenDirection: "down", selectedFig: legacyBelowCandidate,
+        emission: "none", claim: "none",
+      };
       figs.push(legacyBelowCandidate);
       continue;
     }
@@ -2082,9 +2751,26 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     const downCandidates = suspicious
       ? downSeeds.map((seed, i) => buildDownCandidate(seed, i, downSeeds.length, hardLong)).filter(Boolean)
       : [];
+    if (!suspicious) for (let i = 0; i < downSeeds.length; i++)
+      diagnosticAttempt("down", downSeeds[i].source, i, "not-evaluated",
+        ["down-route-not-suspicious"], {
+          downGapPt, bareLabel, hardLong, activeSignals,
+          seedBoxPt: {
+            x0: downSeeds[i].bx0, y0: capBottom,
+            x1: downSeeds[i].bx1, y1: Math.min(pg.h, capBottom + 48),
+          },
+        });
     const healthyBareUp = bareLabel && upCandidate && upCandidate.valid &&
       Number.isFinite(upCandidate.score.total) && upCandidate.score.total >= 8;
     if (healthyBareUp) dbg(`  Fig${num}: SIDE REJECT healthy-bare-up`);
+    if (healthyBareUp) {
+      diagnosticAttempt("left", "none", 0, "not-evaluated", ["healthy-bare-up"], {
+        upScore: upCandidate.score.total,
+      });
+      diagnosticAttempt("right", "none", 0, "not-evaluated", ["healthy-bare-up"], {
+        upScore: upCandidate.score.total,
+      });
+    }
     const leftSeeds = healthyBareUp ? [] : sideSeedBounds("left");
     const rightSeeds = healthyBareUp ? [] : sideSeedBounds("right");
     const leftCandidates = leftSeeds
@@ -2124,6 +2810,16 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     suppressDominatedImageTail(leftCandidates);
     suppressDominatedImageTail(rightCandidates);
     const alternatives = [...downCandidates, ...leftCandidates, ...rightCandidates];
+    if (diag) {
+      if (upCandidate) diag.emitCandidate(upCandidate, {
+        decision: "considered", reasons: [],
+      });
+      for (const candidate of alternatives) diag.emitCandidate(candidate, {
+        decision: "considered",
+        reasons: candidate.diagReasons_ || (candidate.rejectReason
+          ? candidate.rejectReason.split(",").filter(Boolean) : []),
+      });
+    }
     /* soft 애매역 floor 검증용 up-점수 노출 (v2.14.0) — ★ chosen 후보 점수가 아니라 up 후보 점수다.
      * floor 정의가 "up-score < FLOOR"이므로 chose가 down/side여도 up 점수를 봐야 한다. up 후보가
      * 없으면(캡션-위 legacyBelow 등) undefined로 남겨 pass2가 "fig 있으면 유지"(진짜 캡션-위 도형
@@ -2166,7 +2862,28 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
     dbg(`  Fig${num}: CHOSE ${chose} margin=${decision.margin.toFixed(1)}` +
       ` minAlt=${policy.minScore.toFixed(1)} delta=${delta}` +
       ` seed=${chosen && chosen.seedSource ? chosen.seedSource : "-"}`);
-    if (chosen) { chosen.fig.dir_ = chose; chosen.fig._anchor = cap; figs.push(chosen.fig); }
+    if (diag) diag.add("selection", {
+      anchorId, captionPage: pg.num, candidatePage: pg.num, pass, num,
+      decision: chosen ? "chosen" : "none",
+      consideredCandidateIds: [upCandidate, ...alternatives]
+        .filter(Boolean).map(candidate => diag.candidateId(candidate)),
+      chosenCandidateId: diag.candidateId(chosen),
+      chosenDirection: chose,
+      minScore,
+      margin: decision.margin,
+      adjacentEvidence,
+      delta: delta === "n/a" ? null : Number(delta),
+      reasons: chosen ? ["hysteresis-selection"] : ["no-eligible-candidate"],
+    });
+    if (chosen) {
+      chosen.fig.dir_ = chose;
+      chosen.fig._anchor = cap;
+      capInfo.adjacentState_ = {
+        selection: "chosen", chosenDirection: chose, selectedFig: chosen.fig,
+        emission: "none", claim: "none",
+      };
+      figs.push(chosen.fig);
+    }
   }
   /* offset side-by-side 컬럼 분리 (v2.10.2) — 같은 baseline 형제는 위 per-candidate clamp(v2.10.1)가
    * 이미 처리한다. 여기서는 baseline이 어긋난 나란한 형제(키 큰/작은 이웃 — Dong Fig4는 Fig3보다
@@ -2190,13 +2907,30 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
       if (Math.abs(gBaseY - fBaseY) <= SAME_BASELINE_PT) continue;      // same-baseline → v2.10.1 per-candidate
       if (Math.min(F.y1, G.y1) - Math.max(F.y0, G.y0) <= 0) continue;   // 영역 세로 겹침 없으면 다른 행(stacked)
       const gCapL = G.captionBox.x0, gCapR = G.captionBox.x1;
+      const before = diag ? { x0: F.x0, y0: F.y0, x1: F.x1, y1: F.y1 } : null;
       if (gCapL > fCapR) {                                              // G가 우측 컬럼
         if (F.x1 > gCapL * S) F.x1 = Math.min(F.x1, Math.round((fCapR + SIBLING_COL_MARGIN) * S) + 10);
       } else if (gCapR < fCapL) {                                       // G가 좌측 컬럼
         if (F.x0 < gCapR * S) F.x0 = Math.max(F.x0, Math.round((fCapL - SIBLING_COL_MARGIN) * S) - 10);
       }
+      if (diag && (before.x0 !== F.x0 || before.x1 !== F.x1)) {
+        diag.add("relation", {
+          page: pg.num, pass, decision: "clamp",
+          claimantCandidateId: diag.figCandidateId(F),
+          counterpartCandidateId: diag.figCandidateId(G),
+          claimantNum: F.num, counterpartNum: G.num,
+          nums: [F.num, G.num],
+          beforeBoxPx: before,
+          afterBoxPx: { x0: F.x0, y0: F.y0, x1: F.x1, y1: F.y1 },
+          reasons: ["offset-sibling-column"],
+        });
+      }
     }
   }
+  if (diag) diag.add("detection-pass", {
+    page: pg.num, pass, decision: "completed",
+    outputCandidateIds: figs.map(fig => diag.figCandidateId(fig)),
+  });
   return figs;
 }
 
@@ -2210,16 +2944,24 @@ function detectPage(pg, lines, dom, grid, dbg, captionData) {
  * 강등 0이면 재실행 없음 → 전량승격·전량기각 문서와 byte-identical(provisional 앵커가 없으므로).
  * ★ 강등 되돌림은 승격의 완전 역연산 + assembleAnchors 재조립(promoteSoftAnchors 미러) — 누락 시
  *   stale anchors가 강등 라인을 물고 있어 재실행이 오염 상태를 본다. */
-function detectPageWithFloor(pd, dom, grid, dbg) {
+function detectPageWithFloor(pd, dom, grid, dbg, diag) {
   const cd = pd.captionData;
   const provisionalSoft = () => cd.softSlots.filter(c => {
     const info = cd.infoByAnchor.get(c.line);
     return info && info.soft && info.provisional;
   });
-  let figs = detectPage(pd, pd.lines, dom, grid, dbg, cd);
-  if (!provisionalSoft().length) return figs;             // 애매역 아님 → 단일 실행(현행 경로)
+  let detectPass = 0;
+  let figs = detectPage(pd, pd.lines, dom, grid, dbg, cd, diag, detectPass);
+  if (!provisionalSoft().length) {                        // 애매역 아님 → 단일 실행(현행 경로)
+    if (diag) diag.add("floor-pass", {
+      page: pd.num, pass: detectPass, decision: "active",
+      outputCandidateIds: figs.map(fig => diag.figCandidateId(fig)),
+      reasons: ["no-provisional-soft-anchor"],
+    });
+    return figs;
+  }
   const bound = cd.softSlots.length + 1;                  // 매 회 ≥1 강등 → 앵커 수 상한서 종료
-  for (let pass = 0; pass < bound; pass++) {
+  for (let floorPass = 0; floorPass < bound; floorPass++) {
     const demote = [];
     for (const c of provisionalSoft()) {
       const info = cd.infoByAnchor.get(c.line);
@@ -2233,23 +2975,563 @@ function detectPageWithFloor(pd, dom, grid, dbg) {
     }
     if (!demote.length) break;
     for (const { c, up, hasFig } of demote) {
+      if (diag) diag.add("floor-decision", {
+        page: pd.num, pass: detectPass,
+        anchorId: diag.registerAnchor(pd, c.line),
+        candidateId: diag.figCandidateId(figs.find(f => f._anchor === c.line)),
+        num: c.num, upScore: up, hasFig, floor: SOFT_UP_FLOOR,
+        decision: "demoted",
+        reasons: [up === undefined ? "no-up-and-no-output" : "up-below-soft-floor"],
+      });
       cd.slots[c.index] = undefined;                       // 승격 역연산 (희소 배열 구멍)
       cd.ownerByPart.delete(c.line);
       cd.infoByAnchor.delete(c.line);
       dbg(`  [floor] DEMOTE p${pd.num} num=${c.num} up=${up === undefined ? "-" : up.toFixed(2)}` +
           ` fig=${hasFig ? 1 : 0} < ${SOFT_UP_FLOOR}`);
     }
+    if (diag) diag.add("floor-pass", {
+      page: pd.num, pass: detectPass, decision: "superseded",
+      outputCandidateIds: figs.map(fig => diag.figCandidateId(fig)),
+      demotedAnchorIds: demote.map(({ c }) => diag.registerAnchor(pd, c.line)),
+      reasons: ["soft-floor-retry"],
+    });
     cd.anchors = assembleAnchors(cd.slots, cd.embedded);   // ★ 재조립 필수 (line ~604 미러)
-    figs = detectPage(pd, pd.lines, dom, grid, dbg, cd);   // 이웃 오염 복구 재실행
+    detectPass++;
+    figs = detectPage(pd, pd.lines, dom, grid, dbg, cd, diag, detectPass); // 이웃 오염 복구 재실행
   }
+  if (diag) diag.add("floor-pass", {
+    page: pd.num, pass: detectPass, decision: "active",
+    outputCandidateIds: figs.map(fig => diag.figCandidateId(fig)),
+    reasons: ["soft-floor-fixpoint"],
+  });
   return figs;
+}
+
+const adjacentBoxGapPt = (a, b) => {
+  const dx = Math.max(0, Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1));
+  const dy = Math.max(0, Math.max(a.y0, b.y0) - Math.min(a.y1, b.y1));
+  return dx === 0 && dy === 0 ? 0 : Math.hypot(dx, dy);
+};
+
+/* PB-4B 12-A composition 관측. 아래 값은 25행 fit에서 A/B가 일치한 관측 파라미터일 뿐 public
+ * resolver threshold가 아니다. decision은 계속 abstain이며 반례가 생기면 ambiguous로 보존한다. */
+function observeAdjacentComposition(regions, pageHeightPt, repeatedLineKeys) {
+  const furniture = new Map();
+  for (const region of regions) {
+    const reasons = [];
+    const box = region.bboxPt;
+    const lineRefs = region.lineRefs;
+    if (lineRefs.some(line => line.kind === "header") && box.y1 <= 56)
+      reasons.push("L-header");
+    if (lineRefs.some(line => line.kind === "footer") && box.y0 >= pageHeightPt - 56)
+      reasons.push("L-footer");
+    if (lineRefs.some(line => line.kind === "body")) reasons.push("L-body");
+    if (repeatedLineKeys && lineRefs.length &&
+        lineRefs.every(line => repeatedLineKeys.has(
+          `${line.textHash}|${Math.round(line.bboxPt.y0)}`)))
+      reasons.push("R-repeat");
+    const width = box.x1 - box.x0, height = box.y1 - box.y0;
+    const minDim = Math.min(width, height);
+    const elong = Math.max(width, height) / Math.max(minDim, 1e-9);
+    const edge = region.edgeDistancePt;
+    const minEdge = Math.min(edge.top, edge.right, edge.bottom, edge.left);
+    if (minDim <= 2.5) reasons.push("S-hairline");
+    if (elong >= 25 && minEdge <= 25) reasons.push("S-marginstrip");
+    const touch = region.pageEdgeTouch;
+    if (!lineRefs.length && (touch.top || touch.right || touch.bottom || touch.left))
+      reasons.push("S-edgeblock");
+    furniture.set(region.regionId, reasons);
+  }
+  const pool = regions.filter(region => !(furniture.get(region.regionId) || []).length);
+  const subtractive = pool.map(region => region.regionId);
+  const accreted = [];
+  if (pool.length) {
+    const seed = pool.reduce((best, region) => {
+      if (!best) return region;
+      const signal = region.imageAreaSumRatio * adjacentArea(region.bboxPx);
+      const bestSignal = best.imageAreaSumRatio * adjacentArea(best.bboxPx);
+      if (signal !== bestSignal) return signal > bestSignal ? region : best;
+      return adjacentArea(region.bboxPx) > adjacentArea(best.bboxPx) ? region : best;
+    }, null);
+    const selected = [seed], left = pool.filter(region => region !== seed);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (let index = left.length - 1; index >= 0; index--) {
+        if (!selected.some(region =>
+          adjacentBoxGapPt(region.bboxPt, left[index].bboxPt) <= 30)) continue;
+        selected.push(left[index]);
+        left.splice(index, 1);
+        grew = true;
+      }
+    }
+    accreted.push(...selected.map(region => region.regionId).sort());
+  }
+  const a = [...subtractive].sort();
+  const confirmed = a.length > 0 && JSON.stringify(a) === JSON.stringify(accreted);
+  return {
+    composition: confirmed ? "confirmed" : "ambiguous",
+    regionIds: confirmed ? a : [],
+    regionCount: confirmed ? a.length : null,
+    subtractiveRegionIds: a,
+    accretionRegionIds: accreted,
+    furniture: [...furniture.entries()]
+      .filter(([, reasons]) => reasons.length)
+      .map(([regionId, reasons]) => ({ regionId, reasons })),
+  };
+}
+
+/* PB-4B 12-A `strong` 계측 (v2.18.0). Q6 전수 라운드에서 12-B 발화 28행 중 오발 2행이
+ * composition·unclaimed 세 가드를 모두 통과한 원인은 "N−1 선택이 애초에 그림인가"를 보는 항이
+ * 없다는 것이었다(Weiss p1 = 순수 본문 텍스트, science-1247125 p2 = Box 내부 소형 그림).
+ * 여기서는 그 두 축을 **관측값으로만** 방출한다. `strong` tri-state는 계속 null이고 임계는 없다
+ * (§13 threshold 잠금). 원자료는 이미 region record에 있어 새 렌더·새 계측이 없다.
+ * raster 점유(rasterCoverage)는 정답 4행이 0이라 판별에 쓸 수 없다는 실측을 같이 남긴다. */
+/* 지면 장식 띠 (v2.19.3) — 머리글/꼬리말 띠가 figure로 방출되던 결함(Sanesi 10@p13 = 폭 전면·
+ * 높이 31pt의 러닝헤더)을 막는다. 같은 취지의 가드가 side 후보에는 있고(heightRatio < 0.09)
+ * up 후보에는 아예 없었다 — up은 valid:true 하드코딩이고 chooseCandidate가 up.valid를 읽지도
+ * 않으므로 후보 단계에서 막으면 무발동이거나 healthyBareUp·upScore_ 경로가 함께 뒤집힌다.
+ * 두 조건을 AND로 쓴다: 현상이 "폭 전면 얇은 띠"이므로 폭 조건이 빠지면 규칙이 현상보다 넓어진다
+ * (전수 실측: 폭 조건 없이 FP 11 / 부수 7, 폭 0.8 이상이면 FP 4 / 부수 2, 정답 손실은 둘 다 0).
+ * 높이 0.05는 가장 가까운 정답행(Penn 1@p29 = 0.0557)과 4.5pt 여유를 둔 값이다 — 0.055는 여유가
+ * 0.55pt로 알려진 헤드리스↔GPU bbox 변동폭(~0.9pt)보다 작아 환경에 따라 판정이 뒤집힌다.
+ * 비율 단위인 이유: 같은 취지의 기존 side 가드가 heightRatio 기준이라 그 선례를 따른다. */
+const FURNITURE_STRIP_MAX_HEIGHT = 0.05;
+const FURNITURE_STRIP_MIN_WIDTH = 0.80;
+
+/* PB-4B 12-B 잠정 문턱 (v2.19.0). Q6 전수 라운드에서 정답 26행과 오발 2행 사이에 빈 구간이
+ * 있었고(textCoverage 0.29↔0.86, selectionAreaRatio 0.42↔0.014) 캡션이 다음 장으로 밀리는 원인
+ * 자체가 "그림이 페이지를 거의 채웠다"라서 면적 하한은 현상의 정의에서 나온다. 불통과는 abstain
+ * (=현재 동작)이므로 조여서 틀리면 현상 유지, 기존 상자를 망가뜨리는 방향으로는 실패하지 않는다. */
+const ADJ_TEXT_COVERAGE_MAX = 0.50;   // 정답 최대 0.2895 ↔ 오발 0.8551의 기하 중간
+const ADJ_SELECTION_AREA_MIN = 0.30;  // 정답 최소 0.4241의 71%, 오발 0.0142의 21배
+const ADJ_OUTSET_PX = 10;             // same-page legacy-image 후보의 x 여백과 동일한 값 (새 상수 아님)
+
+function observeAdjacentStrength(regions, selectedIds, pageAreaPt) {
+  const selected = regions.filter(region => selectedIds.includes(region.regionId));
+  if (!selected.length) return null;
+  let areaSum = 0, lineAreaSum = 0, inkWeighted = 0, rasterWeighted = 0, lineCount = 0;
+  for (const region of selected) {
+    const area = adjacentArea(region.bboxPt);
+    areaSum += area;
+    lineCount += region.lineRefs.length;
+    for (const line of region.lineRefs) lineAreaSum += adjacentArea(line.bboxPt);
+    inkWeighted += (region.inkDensityObserved_ || 0) * area;
+    rasterWeighted += region.imageAreaSumRatio * area;
+  }
+  const denom = Math.max(areaSum, 1e-9);
+  return {
+    selectionAreaRatio: areaSum / Math.max(pageAreaPt, 1e-9),
+    textCoverage: lineAreaSum / denom,
+    rasterCoverage: rasterWeighted / denom,
+    inkDensity: inkWeighted / denom,
+    lineCount,
+  };
+}
+
+/* ===================== PB-4A/B N−1 association observer =====================
+ * same-page public 결과와 active claim을 scalar snapshot으로 받은 뒤에만 실행한다. 별도 adjacent
+ * namespace에 raw XObject/ink/line/claim 관계를 기록한다. PB-4B 12-A부터 렌더·합성·guard 계산은
+ * graph 유무와 무관하게 동일하고 diag는 기록에만 쓰며, 선택·방출·crop은 여전히 절대 수정하지 않는다. */
+async function observeAdjacentPages(pageData, dom, diag, opts, checkAborted, snapshots, ownedClaims,
+  captionBySnapshot) {
+  const resolved = [];                       // 12-B가 새로 방출할 figure (없으면 빈 배열)
+  if (!snapshots.length) return resolved;
+  const emittedNums = new Set(ownedClaims.map(claim => String(claim.num)));
+  const byTarget = new Map();
+  for (const snapshot of snapshots) {
+    if (!byTarget.has(snapshot.candidatePage)) byTarget.set(snapshot.candidatePage, []);
+    byTarget.get(snapshot.candidatePage).push(snapshot);
+  }
+  const targetPages = new Set(byTarget.keys());
+  const lineKeysByTarget = new Map([...targetPages].map(page => [page,
+    new Set(pageData[page - 1].lines.map(line =>
+      `${diagnosticTextHash(line.s)}|${Math.round(line.top)}`))]));
+  for (const [targetPage, anchors] of [...byTarget.entries()].sort((a, b) => a[0] - b[0])) {
+    checkAborted();
+    const pd = pageData[targetPage - 1];
+    const anchorIds = anchors.map(anchor => anchor.anchorId).sort();
+    let canvas = null, grid = null, imageBoxes = [], operatorError = null;
+    const releaseOwnedCanvas = () => {
+      if (canvas && !opts.renderPage) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    };
+    try {
+      imageBoxes = await getImageBoxes(pd.page, pd.h, error => { operatorError = error; });
+      checkAborted();
+      if (operatorError) throw operatorError;
+      if (opts.renderPage) {
+        checkAborted();
+        canvas = await opts.renderPage(targetPage, S);
+        checkAborted();
+      } else {
+        const vp = pd.page.getViewport({ scale: S });
+        canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
+        checkAborted();
+        const task = pd.page.render({ canvasContext: canvas.getContext("2d"), viewport: vp });
+        const onAbort = () => task.cancel();
+        if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          await task.promise;
+        } finally {
+          if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+        }
+        checkAborted();
+      }
+      grid = makeInk(canvas, !opts.renderPage);   // 카나리아는 엔진 소유 캔버스에서만 (B7)
+    } catch (error) {
+      releaseOwnedCanvas();
+      if (opts.signal && opts.signal.aborted)
+        throw new DOMException("figure 추출이 취소됨", "AbortError");
+      /* 죽은 캔버스는 "이 PDF가 특이하다"가 아니라 실행 환경 실패다 (B7). unobservable로 삼키면
+       * 12-B 방출이 조용히 사라져 실제 회귀와 구별되지 않는다 — 관측 계층이라도 그대로 올린다. */
+      if (isFigRenderError(error)) throw error;
+      diag?.add("adjacent-page-render", {
+        page: targetPage, observation: "n-1", captionPages: [...new Set(anchors.map(a => a.captionPage))],
+        anchorIds, decision: "unobservable", reasons: ["page-render-or-operator-failure"],
+        errorName: error && error.name || "Error",
+      });
+      for (const anchor of anchors) diag?.add("adjacent-observation", {
+        ...anchor, rawRegionIds: [], rawRegionCount: null, anchorRegionRelationIds: [],
+        regionIds: [], regionCount: null,
+        single: null, composition: null, strong: null, strongMetrics: null,
+        unclaimed: null, multiPage: null,
+        captionCompetition: null, captionCompetitionAnchorIds: [],
+        competingSelectionAnchorIds: [], ownedIntersectionRegionIds: [],
+        replacementClass: "unobservable", decision: "abstain",
+        reasons: ["adjacent-page-unobservable"],
+      });
+      continue;
+    }
+
+    try {
+      diag?.add("adjacent-page-render", {
+        page: targetPage, observation: "n-1", captionPages: [...new Set(anchors.map(a => a.captionPage))],
+        anchorIds, widthPt: pd.w, heightPt: pd.h,
+        widthPx: grid.W, heightPx: grid.H, scale: S, imageCount: imageBoxes.length,
+        decision: "observed", reasons: ["graph-only-adjacent-render"],
+      });
+
+      const xobjects = imageBoxes
+        .map(box => ({
+          kind: "filtered-xobject",
+          bboxPx: {
+            x0: Math.max(0, Math.round(box.left * S)),
+            y0: Math.max(0, Math.round(box.top * S)),
+            x1: Math.min(grid.W, Math.round((box.left + box.w) * S)),
+            y1: Math.min(grid.H, Math.round((box.top + box.h) * S)),
+          },
+        }))
+        .filter(seed => adjacentArea(seed.bboxPx) > 0)
+        .sort((a, b) => a.bboxPx.y0 - b.bboxPx.y0 || a.bboxPx.x0 - b.bboxPx.x0 ||
+          a.bboxPx.y1 - b.bboxPx.y1 || a.bboxPx.x1 - b.bboxPx.x1);
+      const inkBands = adjacentInkBands(grid);
+      const seeds = [
+        ...xobjects.map((seed, index) => ({
+          ...seed, seedId: `adj/p${targetPage}/xobject/${index}`,
+          imageId: `xobject/${index}`,
+        })),
+        ...inkBands.map((seed, index) => ({
+          ...seed, seedId: `adj/p${targetPage}/ink-band/${index}`,
+        })),
+      ];
+      for (const seed of seeds) {
+        const box = seed.bboxPx;
+        diag?.add("adjacent-seed", {
+          seedId: seed.seedId, page: targetPage, kind: seed.kind,
+          bboxPx: box, bboxPt: adjacentPxBoxToPt(box),
+          edgeDistancePt: Math.min(box.x0, box.y0, grid.W - box.x1, grid.H - box.y1) / S,
+          imageId: seed.imageId || null,
+          imageFilterMinWidthPt: seed.kind === "filtered-xobject" ? 10 : null,
+          imageFilterMinHeightPt: seed.kind === "filtered-xobject" ? 10 : null,
+          rowStart: seed.rowStart ?? null, rowEnd: seed.rowEnd ?? null,
+          rowInkMax: seed.rowInkMax ?? null, inkPixels: seed.inkPixels ?? null,
+          inkDensity: seed.inkDensity ?? null,
+          threshold: seed.threshold ?? null, separatorPx: seed.separatorPx ?? null,
+          decision: "observed", reasons: ["raw-adjacent-seed"],
+        });
+      }
+
+      const regions = adjacentRegions(seeds).map((region, index) => ({
+        ...region, regionId: `adj/p${targetPage}/region/${index}`,
+      }));
+      const pageClaims = ownedClaims.filter(claim => claim.page === targetPage);
+      const claimRelationsByRegion = new Map(regions.map(region => [region.regionId, []]));
+      for (const region of regions) for (const claim of pageClaims) {
+        const intersection = adjacentIntersection(region.bboxPx, claim.outputBoxPx);
+        if (!intersection) continue;
+        const regionArea = adjacentArea(region.bboxPx), claimArea = adjacentArea(claim.outputBoxPx);
+        claimRelationsByRegion.get(region.regionId).push({
+          claim, intersection, regionArea, claimArea,
+        });
+      }
+      const stoppers = new Set(pd.lines.filter(line => {
+        if (line.font !== dom) return false;
+        const nb = neighborsOf(line, pd.lines);
+        return (line.w >= 190 && (nb.above || nb.below)) ||
+          (line.w >= 100 && nb.above && nb.below);
+      }));
+      for (const region of regions) {
+        const box = region.bboxPx, boxPt = adjacentPxBoxToPt(box);
+        const lineRefs = [];
+        for (let index = 0; index < pd.lines.length; index++) {
+          const line = pd.lines[index];
+          const lineBox = {
+            x0: line.left, y0: line.top, x1: line.left + line.w, y1: line.top + line.h,
+          };
+          if (adjacentIntersection(boxPt, lineBox) <= 0) continue;
+          let kind = "other";
+          if (pd.captionData.ownerByPart.has(line) || isCaption(line) != null) kind = "figure-caption";
+          else if (isTableCaption(line)) kind = "table-caption";
+          else if (line.top + line.h <= 56) kind = "header";
+          else if (line.top >= pd.h - 56) kind = "footer";
+          else if (stoppers.has(line)) kind = "body";
+          lineRefs.push({
+            lineIndex: index, kind, bboxPt: {
+              x0: line.left, y0: line.top, x1: line.left + line.w, y1: line.top + line.h,
+            }, textHash: diagnosticTextHash(line.s),
+          });
+        }
+        const area = adjacentArea(box);
+        const imageRefs = region.seeds.filter(seed => seed.kind === "filtered-xobject")
+          .map(seed => seed.imageId);
+        const inkPixels = region.seeds.reduce((sum, seed) => sum + (seed.inkPixels || 0), 0);
+        const edgeDistancePt = {
+          top: box.y0 / S, right: (grid.W - box.x1) / S,
+          bottom: (grid.H - box.y1) / S, left: box.x0 / S,
+        };
+        const pageEdgeTouch = {
+          top: box.y0 <= 0, bottom: box.y1 >= grid.H,
+          left: box.x0 <= 0, right: box.x1 >= grid.W,
+        };
+        region.bboxPt = boxPt;
+        region.lineRefs = lineRefs;
+        region.inkDensityObserved_ = inkPixels / Math.max(1, area);   // strong 관측용 (v2.18.0)
+        region.edgeDistancePt = edgeDistancePt;
+        region.pageEdgeTouch = pageEdgeTouch;
+        region.imageAreaSumRatio = region.seeds
+          .filter(seed => seed.kind === "filtered-xobject")
+          .reduce((sum, seed) => sum + adjacentArea(seed.bboxPx), 0) / Math.max(1, area);
+        diag?.add("adjacent-region", {
+          regionId: region.regionId, page: targetPage,
+          seedIds: region.seeds.map(seed => seed.seedId),
+          sourceKinds: region.sourceKinds, bboxPx: box, bboxPt: boxPt,
+          widthRatio: (box.x1 - box.x0) / grid.W,
+          heightRatio: (box.y1 - box.y0) / grid.H,
+          areaRatio: area / Math.max(1, grid.W * grid.H),
+          inkDensity: inkPixels / Math.max(1, area),
+          imageRefs, imageAreaSumRatio: region.imageAreaSumRatio,
+          lineRefs,
+          tableBodyContext: "unobservable",
+          edgeDistancePt,
+          pageEdgeTouch,
+          rawClaimState: claimRelationsByRegion.get(region.regionId).length
+            ? "owned-intersection" : "no-owned-intersection",
+          strong: null, strongReason: "unclassified-pb4a",
+          decision: "observed", reasons: ["raw-overlap-cluster"],
+        });
+      }
+      for (let i = 0; i < regions.length; i++) for (let j = i + 1; j < regions.length; j++) {
+        const a = regions[i], b = regions[j];
+        const intersection = adjacentIntersection(a.bboxPx, b.bboxPx);
+        if (!intersection) continue;
+        const areaA = adjacentArea(a.bboxPx), areaB = adjacentArea(b.bboxPx);
+        diag?.add("adjacent-region-relation", {
+          regionIds: [a.regionId, b.regionId], page: targetPage,
+          intersectionPx2: intersection,
+          iou: intersection / Math.max(1, areaA + areaB - intersection),
+          aContainment: intersection / Math.max(1, areaA),
+          bContainment: intersection / Math.max(1, areaB),
+          decision: "observed", reasons: ["positive-intersection"],
+        });
+      }
+
+      for (const region of regions) for (const relation of claimRelationsByRegion.get(region.regionId)) {
+        const { claim, intersection, regionArea, claimArea } = relation;
+        diag?.add("adjacent-claim-relation", {
+          regionId: region.regionId, claimCandidateId: claim.candidateId,
+          claimAnchorId: claim.anchorId, claimNum: claim.num,
+          nums: [...new Set([...anchors.map(anchor => anchor.num), claim.num])], page: targetPage,
+          intersectionPx2: intersection,
+          iou: intersection / Math.max(1, regionArea + claimArea - intersection),
+          regionContainment: intersection / Math.max(1, regionArea),
+          claimContainment: intersection / Math.max(1, claimArea),
+          decision: "observed", reasons: ["positive-owned-claim-intersection"],
+        });
+      }
+      const repeatedLineKeys = new Set();
+      for (const [page, keys] of lineKeysByTarget)
+        if (page !== targetPage) for (const key of keys) repeatedLineKeys.add(key);
+      const composition = observeAdjacentComposition(
+        regions, pd.h, targetPages.size > 1 ? repeatedLineKeys : null);
+      const strengthMetrics = observeAdjacentStrength(
+        regions, composition.regionIds, (grid.W / S) * (grid.H / S));
+      const targetAnchors = (pd.captionData.anchors || []).map(cap => {
+        const info = pd.captionData.infoByAnchor.get(cap);
+        return {
+          anchorId: diag ? diag.registerAnchor(pd, cap) : null,
+          num: info && info.num,
+        };
+      });
+      for (const anchor of anchors) {
+        const relationIds = [];
+        for (const region of regions) {
+          const relationId = `${anchor.anchorId}/adjacent/${region.regionId}`;
+          relationIds.push(relationId);
+          diag?.add("adjacent-anchor-region", {
+            relationId, anchorId: anchor.anchorId, num: anchor.num,
+            captionPage: anchor.captionPage, candidatePage: anchor.candidatePage,
+            regionId: region.regionId, page: targetPage,
+            edgeDistancePt: {
+              top: region.bboxPx.y0 / S, right: (grid.W - region.bboxPx.x1) / S,
+              bottom: (grid.H - region.bboxPx.y1) / S, left: region.bboxPx.x0 / S,
+            },
+            rawClaimState: claimRelationsByRegion.get(region.regionId).length
+              ? "owned-intersection" : "no-owned-intersection",
+            decision: "observed", reasons: ["threshold-free-page-edge-association"],
+          });
+        }
+        const selectedRegionSet = new Set(composition.regionIds);
+        const ownedIntersectionRegionIds = regions
+          .filter(region => selectedRegionSet.has(region.regionId) &&
+            claimRelationsByRegion.get(region.regionId).length)
+          .map(region => region.regionId);
+        const captionCompetitionAnchorIds = targetAnchors
+          .filter(other => String(other.num) !== String(anchor.num))
+          .map(other => other.anchorId).filter(Boolean).sort();
+        /* 12-A에는 adjacent selection 자체가 없으므로 세 번째 guard의 현재 관측값은 0이다.
+         * resolver가 생기면 같은 target page에서 먼저 확정된 다른 selection ID가 여기에 들어간다. */
+        const competingSelectionAnchorIds = [];
+        const captionCompetition = captionCompetitionAnchorIds.length > 0;
+        const unclaimed = ownedIntersectionRegionIds.length > 0 || captionCompetition ||
+          competingSelectionAnchorIds.length > 0
+          ? false
+          : composition.composition === "confirmed" ? true : null;
+        diag?.add("adjacent-observation", {
+          ...anchor,
+          rawRegionIds: regions.map(region => region.regionId),
+          rawRegionCount: regions.length, anchorRegionRelationIds: relationIds,
+          regionIds: composition.regionIds, regionCount: composition.regionCount,
+          single: null, composition: composition.composition,
+          compositionSubtractiveRegionIds: composition.subtractiveRegionIds,
+          compositionAccretionRegionIds: composition.accretionRegionIds,
+          compositionFurniture: composition.furniture,
+          strong: null, strongMetrics: strengthMetrics, unclaimed, multiPage: null,
+          captionCompetition, captionCompetitionAnchorIds,
+          competingSelectionAnchorIds, ownedIntersectionRegionIds,
+          replacementClass: "observation-only-pb4b-12a",
+          decision: "abstain",
+          reasons: [
+            "observation-only", "single-deprecated", "strong-unclassified",
+            composition.composition === "confirmed"
+              ? "composition-consensus" : "composition-ambiguous",
+            unclaimed === true ? "unclaimed-three-guards-clear"
+              : unclaimed === false ? "unclaimed-guard-blocked" : "unclaimed-unclassified",
+            "multi-page-unobserved",
+          ],
+        });
+        /* ---- 12-B 최소 안전 행동: A/B 상태 한정 신규 방출. replace는 12-C로 계속 잠금 ---- */
+        const caption = captionBySnapshot && captionBySnapshot.get(anchor) || null;
+        const gate = {
+          unclaimed: unclaimed === true,
+          composition: composition.composition === "confirmed",
+          emission: ["none", "dropped", "inactive"].includes(String(anchor.currentEmission)),
+          sameNumFree: !emittedNums.has(String(anchor.num)),
+          textCoverage: !!strengthMetrics &&
+            strengthMetrics.textCoverage <= ADJ_TEXT_COVERAGE_MAX,
+          selectionArea: !!strengthMetrics &&
+            strengthMetrics.selectionAreaRatio >= ADJ_SELECTION_AREA_MIN,
+          captionKnown: !!(caption && caption.box),
+        };
+        const blocked = Object.entries(gate)
+          .filter(([, pass]) => !pass).map(([key]) => `blocked-${key}`);
+        let outputBoxPx = null;
+        if (!blocked.length) {
+          const selectedRegions = regions
+            .filter(region => selectedRegionSet.has(region.regionId));
+          const union = {
+            x0: Math.min(...selectedRegions.map(region => region.bboxPx.x0)),
+            y0: Math.min(...selectedRegions.map(region => region.bboxPx.y0)),
+            x1: Math.max(...selectedRegions.map(region => region.bboxPx.x1)),
+            y1: Math.max(...selectedRegions.map(region => region.bboxPx.y1)),
+          };
+          /* 합성 union은 잉크 경계라 same-page 상자보다 타이트하다. 여백은 same-page와 같은 10px을
+           * 쓰되 페이지 변과 furniture(머리글·꼬리말·장식 띠)로 클램프해 넘침을 막는다. */
+          const furnitureIds = new Set(composition.furniture.map(entry => entry.regionId));
+          const furnitureBoxes = regions
+            .filter(region => furnitureIds.has(region.regionId)).map(region => region.bboxPx);
+          const box = {
+            x0: Math.max(0, union.x0 - ADJ_OUTSET_PX),
+            y0: Math.max(0, union.y0 - ADJ_OUTSET_PX),
+            x1: Math.min(grid.W, union.x1 + ADJ_OUTSET_PX),
+            y1: Math.min(grid.H, union.y1 + ADJ_OUTSET_PX),
+          };
+          for (const fb of furnitureBoxes) {
+            if (adjacentIntersection(union, fb) > 0) continue;   // 원래도 겹쳤으면 여백 탓이 아니다
+            if (adjacentIntersection(box, fb) <= 0) continue;    // 확장해도 안 닿으면 둘 필요 없다
+            if (fb.y1 <= union.y0) box.y0 = Math.max(box.y0, fb.y1);
+            if (fb.y0 >= union.y1) box.y1 = Math.min(box.y1, fb.y0);
+            if (fb.x1 <= union.x0) box.x0 = Math.max(box.x0, fb.x1);
+            if (fb.x0 >= union.x1) box.x1 = Math.min(box.x1, fb.x0);
+          }
+          outputBoxPx = {
+            x0: Math.round(box.x0), y0: Math.round(box.y0),
+            x1: Math.round(box.x1), y1: Math.round(box.y1),
+          };
+          /* same-page에서 막은 지면 장식 띠가 이 경로로 새어나가지 않게 같은 바닥을 적용한다
+           * (v2.19.3). same-page 거부는 claim을 inactive로 만들어 그 anchor를 12-B 대상으로
+           * 승격시키므로, 이 가드가 없으면 띠를 N−1에서 다시 방출할 수 있다. */
+          const outHeightRatio = (outputBoxPx.y1 - outputBoxPx.y0) / Math.max(1, grid.H);
+          const outWidthRatio = (outputBoxPx.x1 - outputBoxPx.x0) / Math.max(1, grid.W);
+          if (outHeightRatio < FURNITURE_STRIP_MAX_HEIGHT &&
+              outWidthRatio >= FURNITURE_STRIP_MIN_WIDTH) {
+            blocked.push("blocked-furnitureStrip");
+            outputBoxPx = null;
+          }
+          if (outputBoxPx) emittedNums.add(String(anchor.num));   // 같은 num 두 앵커의 F8 중단 방지
+          if (outputBoxPx) resolved.push({
+            num: anchor.num, page: targetPage,
+            x0: outputBoxPx.x0, y0: outputBoxPx.y0, x1: outputBoxPx.x1, y1: outputBoxPx.y1,
+            caption: caption.text, captionBox: caption.box,
+            captionPage: anchor.captionPage,     // page ≠ captionPage일 때만 소비자에 방출된다
+            cropPng_: opts.cropImages === false ? null : makeCropPng(canvas, outputBoxPx),
+          });
+        }
+        diag?.add("adjacent-resolution", {
+          anchorId: anchor.anchorId, num: anchor.num,
+          captionPage: anchor.captionPage, candidatePage: anchor.candidatePage,
+          regionIds: composition.regionIds,
+          strongMetrics: strengthMetrics,
+          thresholds: {
+            textCoverageMax: ADJ_TEXT_COVERAGE_MAX,
+            selectionAreaMin: ADJ_SELECTION_AREA_MIN,
+            provisional: true,
+          },
+          outputBoxPx, outputBoxPt: outputBoxPx ? adjacentPxBoxToPt(outputBoxPx) : null,
+          replacementClass: "new-emission-pb4b-12b",
+          decision: blocked.length ? "abstain" : "emitted",
+          reasons: blocked.length ? blocked : ["provisional-threshold-pass"],
+        });
+      }
+    } finally {
+      releaseOwnedCanvas();
+    }
+  }
+  return resolved;
 }
 
 /* ===================== 메인 파이프라인 ===================== */
 async function extract(data, opts = {}) {
   const onProgress = opts.onProgress || (() => {});
   const dbg = opts.debug || (() => {});
+  const diag = makeDiagnosticRecorder(opts.onDiagnostic);
   const maxPages = opts.maxPages;   // 미지정 시 전체 페이지 스캔 (기본 상한 없음)
+  /* v2.19.1: 진단 전용 — false면 크롭 생성·PNG 직렬화를 통째로 건너뛴다. 크롭은 감지 **이후**
+   * 단계라 manifest 출력은 완전히 동일하고, PNG 인코딩·전송·저장 비용만 사라진다.
+   * 이 모드에서는 cropDataURL/cropBlob이 사용 불가이고 크롭 카나리아도 돌지 않는다. */
+  const wantCropImages = opts.cropImages !== false;
   /* 협조적 취소 (PDFViewer#12): 페이지 단위로 signal 체크 — 문서 교체 시 호스트가 abort */
   const checkAborted = () => {
     if (opts.signal && opts.signal.aborted)
@@ -2283,7 +3565,15 @@ async function extract(data, opts = {}) {
   /* 1.5차: 문서 수준 게이트로 soft 캡션 앵커 승격 (v2.9.1). 여기서만 판단할 수 있다 —
    * captionAnchors는 페이지별이고 문서의 hard 앵커 총수는 1차 패스가 끝나야 확정된다.
    * 승격분은 아래 2차 패스의 prefilter(anchors.length)를 자동으로 통과한다. */
-  promoteSoftAnchors(pageData, dbg);
+  promoteSoftAnchors(pageData, dbg, diag);
+  if (diag) for (const pd of pageData) {
+    const activeAnchorIds = pd.captionData.anchors.map(cap => diag.registerAnchor(pd, cap));
+    diag.add("page-text", {
+      page: pd.num, widthPt: pd.w, heightPt: pd.h, lineCount: pd.lines.length,
+      activeAnchorCount: activeAnchorIds.length, activeAnchorIds,
+      decision: activeAnchorIds.length ? "anchor-prerequisite-met" : "anchor-prerequisite-absent",
+    });
+  }
   const dom = Object.entries(fontW).sort((a, b) => b[1] - a[1])[0]?.[0];
   /* 2차: 캡션 있는 페이지만 렌더 + 감지 */
   const allFigs = [];
@@ -2317,22 +3607,229 @@ async function extract(data, opts = {}) {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
       }
     }
-    const grid = makeInk(canvas);
-    const figs = detectPageWithFloor(pd, dom, grid, dbg);
-    /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
-     * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 경쟁은 같은 페이지 안에서만 발생하므로
-     * dedup·최소 크기 필터를 페이지 단위로 끝내고, 살아남은 figure만 즉시 크롭해 보관한다.
-     * 페이지 전체 캔버스는 여기서 참조를 버림 — 스캔 중 동시 상주 최대 1장 (PDFViewer#12). */
-    const best = {};
-    for (const f of figs) {
-      const score = (f.raster_ ? 1e9 : 0) + f.h_;
-      if (!(f.num in best) || score > best[f.num].score) best[f.num] = { score, f };
+    /* 이 아래 페이지 본문은 **전부 동기**다 (detectPageWithFloor·dedup·makeCropPng). Chromium은
+     * task 경계에서만 백킹 스토어를 버리므로, makeInk가 살아 있다고 확인한 캔버스는 크롭을 다 뜰
+     * 때까지 죽지 않는다 — 크롭 카나리아가 1픽셀 검사로 충분한 근거다 (B7).
+     * **여기에 await를 추가하면 그 보장이 깨진다** — 백지 PNG 구멍이 조용히 다시 열린다. */
+    const releasePageCanvas = () => {   // 호스트 주입 캔버스는 우리 소유가 아니다
+      if (!opts.renderPage && canvas) { canvas.width = 0; canvas.height = 0; }
+    };
+    try {
+      const grid = makeInk(canvas, !opts.renderPage);   // 카나리아는 엔진 소유 캔버스에서만
+      if (diag) diag.add("page-render", {
+        page: pd.num, widthPx: grid.W, heightPx: grid.H, scale: S,
+        imageCount: pd.images.length, decision: "same-page-detect",
+      });
+      let figs = detectPageWithFloor(pd, dom, grid, dbg, diag);
+      /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
+       * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 경쟁은 같은 페이지 안에서만 발생하므로
+       * dedup·최소 크기 필터를 페이지 단위로 끝내고, 살아남은 figure만 즉시 크롭해 보관한다.
+       * 페이지 전체 캔버스는 여기서 참조를 버림 — 스캔 중 동시 상주 최대 1장 (PDFViewer#12). */
+      /* 지면 장식 띠 거부 (v2.19.3) — **dedup 앞**에서 판정한다. 뒤에 두면 띠가 우승자로 뽑힌 뒤
+       * 죽고, 같은 num의 진짜 후보는 이미 버려져 복구할 길이 없다(래스터 띠는 raster_ 가산점
+       * 1e9으로 비-래스터 진짜 figure를 무조건 이긴다 — 머리글 띠에 로고가 흔하다). */
+      const strip = f => {
+        const heightRatio = (f.y1 - f.y0) / Math.max(1, grid.H);   // canvas는 해제될 수 있어 grid가 정본
+        const widthRatio = (f.x1 - f.x0) / Math.max(1, grid.W);
+        return heightRatio < FURNITURE_STRIP_MAX_HEIGHT && widthRatio >= FURNITURE_STRIP_MIN_WIDTH;
+      };
+      const kept = figs.filter(f => !strip(f));
+      const beforeStrip = figs;   // dedup 사유 계산은 거부 전 모집단으로 해야 한다 (v2.19.4)
+      if (diag) {
+        for (const f of figs) {
+          if (!strip(f)) continue;
+          /* 거부된 후보에도 dedup 레코드를 남긴다 — 안 남기면 같은 num의 진짜 후보가
+           * "sole-identity-candidate"로 기록돼 **경쟁자를 방금 잃은 바로 그 상황**에 거짓 사유가
+           * 붙고, 그래프만 보고는 띠가 밀어냈다가 죽은 이력을 복원할 수 없다 (v2.19.4). */
+          diag.add("dedup", {
+            page: pd.num, num: f.num,
+            candidateId: diag.figCandidateId(f),
+            winnerCandidateId: diag.figCandidateId(f),
+            rankScore: (f.raster_ ? 1e9 : 0) + f.h_,
+            decision: "dropped", reasons: ["furniture-strip"],
+          });
+          diag.add("emission", {
+            page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+            decision: "dropped",
+            heightRatio: +((f.y1 - f.y0) / Math.max(1, grid.H)).toFixed(4),
+            widthRatio: +((f.x1 - f.x0) / Math.max(1, grid.W)).toFixed(4),
+            maxHeightRatio: FURNITURE_STRIP_MAX_HEIGHT, minWidthRatio: FURNITURE_STRIP_MIN_WIDTH,
+            reasons: ["furniture-strip"],
+          });
+          diag.add("claim", {
+            page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+            decision: "inactive", reasons: ["furniture-strip"],
+          });
+        }
+      }
+      for (const f of figs) {
+        if (!strip(f)) continue;
+        const info = pd.captionData.infoByAnchor.get(f._anchor);
+        if (info && info.adjacentState_ && info.adjacentState_.selectedFig === f) {
+          info.adjacentState_.emission = "dropped";
+          info.adjacentState_.claim = "inactive";
+        }
+      }
+      figs = kept;
+      const best = {};
+      for (const f of figs) {
+        const score = (f.raster_ ? 1e9 : 0) + f.h_;
+        if (!(f.num in best) || score > best[f.num].score) best[f.num] = { score, f };
+      }
+      if (diag) {
+        for (const f of figs) {
+          const winner = best[f.num].f;
+          const sameIdentityCount = beforeStrip.filter(other => other.num === f.num).length;
+          diag.add("dedup", {
+            page: pd.num, num: f.num,
+            candidateId: diag.figCandidateId(f),
+            winnerCandidateId: diag.figCandidateId(winner),
+            rankScore: (f.raster_ ? 1e9 : 0) + f.h_,
+            decision: f === winner ? "kept" : "dropped",
+            reasons: [sameIdentityCount === 1 ? "sole-identity-candidate"
+              : f === winner ? "raster-height-winner" : "lower-raster-height-rank"],
+          });
+        }
+      }
+      for (const f of figs) {
+        const info = pd.captionData.infoByAnchor.get(f._anchor);
+        if (!info || !info.adjacentState_ || info.adjacentState_.selectedFig !== f) continue;
+        info.adjacentState_.emission = "none";
+        info.adjacentState_.claim = "none";
+      }
+      const emittedThisPage = diag ? [] : null;
+      for (const { f } of Object.values(best)) {
+        const widthPx = f.x1 - f.x0, heightPx = f.y1 - f.y0;
+        if (widthPx < 30 || heightPx < 30) {
+          const info = pd.captionData.infoByAnchor.get(f._anchor);
+          if (info && info.adjacentState_ && info.adjacentState_.selectedFig === f) {
+            info.adjacentState_.emission = "dropped";
+            info.adjacentState_.claim = "inactive";
+          }
+          if (diag) {
+            diag.add("emission", {
+              page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+              decision: "dropped", widthPx, heightPx, minWidthPx: 30, minHeightPx: 30,
+              reasons: ["minimum-size"],
+            });
+            diag.add("claim", {
+              page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+              decision: "inactive", reasons: ["minimum-size"],
+            });
+          }
+          continue;
+        }
+        if (wantCropImages) f.cropPng_ = makeCropPng(canvas, f);
+        allFigs.push(f);
+        const info = pd.captionData.infoByAnchor.get(f._anchor);
+        if (info && info.adjacentState_ && info.adjacentState_.selectedFig === f) {
+          info.adjacentState_.emission = "emitted";
+          info.adjacentState_.claim = "owned";
+        }
+        if (diag) emittedThisPage.push(f);
+        if (diag) {
+          const outputBoxPx = { x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1 };
+          diag.add("emission", {
+            page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+            decision: "emitted", widthPx, heightPx, outputBoxPx,
+            outputBoxPt: diag.pxBoxToPt(outputBoxPx),
+            reasons: ["dedup-and-size-pass"],
+          });
+          diag.add("claim", {
+            page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+            decision: "owned", outputBoxPx, outputBoxPt: diag.pxBoxToPt(outputBoxPx),
+            reasons: ["active-emitted-output"],
+          });
+        }
+      }
+      if (diag) for (let i = 0; i < emittedThisPage.length; i++) {
+        const a = emittedThisPage[i];
+        const areaA = Math.max(0, a.x1 - a.x0) * Math.max(0, a.y1 - a.y0);
+        for (let j = i + 1; j < emittedThisPage.length; j++) {
+          const b = emittedThisPage[j];
+          const ix = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+          const iy = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+          const intersection = ix * iy;
+          if (!intersection) continue;
+          const areaB = Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0);
+          const union = areaA + areaB - intersection;
+          diag.add("claim-relation", {
+            page: pd.num, decision: "contested",
+            claimantCandidateId: diag.figCandidateId(a),
+            counterpartCandidateId: diag.figCandidateId(b),
+            claimantNum: a.num, counterpartNum: b.num, nums: [a.num, b.num],
+            intersectionPx2: intersection,
+            iou: union > 0 ? intersection / union : 0,
+            claimantContainment: areaA > 0 ? intersection / areaA : 0,
+            counterpartContainment: areaB > 0 ? intersection / areaB : 0,
+            reasons: ["distinct-identity-overlap-keep", "active-emitted-claims"],
+          });
+        }
+      }
+    } finally {
+      /* 정상·예외 어느 경로로 빠져나가도 페이지 캔버스 백킹 스토어를 반환한다 (B7) —
+       * 크롭이 이미 PNG로 직렬화돼 더 볼 일이 없고, GC를 기다리는 사이 다음 페이지
+       * 캔버스와 동시 상주하는 것을 없앤다. adjacent 경로의 releaseOwnedCanvas와 같은 처리. */
+      releasePageCanvas();
     }
-    for (const { f } of Object.values(best)) {
-      if ((f.x1 - f.x0) < 30 || (f.y1 - f.y0) < 30) continue;
-      f.cropCanvas = makeCrop(canvas, f);
-      allFigs.push(f);
-    }
+  }
+  /* N−1 observer 입력은 same-page lifecycle이 모두 끝난 이 지점에서 scalar로 동결한다.
+   * 이후 public figure 내부 필드 삭제와 adjacent 재렌더가 서로 영향을 주지 않는다. */
+  /* 12-A/12-B eligibility는 기존 output이 없는 A/B 상태만이다. owned C 상태의 dominated/replace는
+   * 12-C로 보류됐으므로 렌더하지 않는다. 이 필터 뒤 0건이면 observer가 즉시 반환한다. */
+  /* 캡션 텍스트·박스는 diag record로 나가면 안 되는 원문이라 snapshot에 싣지 않고 별도 map으로
+   * 넘긴다 (12-B 방출이 caption page 좌표계 값을 그대로 재사용한다). */
+  const adjacentCaptionBySnapshot = new Map();
+  const adjacentSnapshots = pageData.flatMap(pd => pd.num <= 1 ? [] :
+    pd.captionData.anchors.map(cap => {
+      const anchorId = diag ? diag.registerAnchor(pd, cap) : null;
+      const info = pd.captionData.infoByAnchor.get(cap);
+      const local = info && info.adjacentState_ || {
+        selection: "none", chosenDirection: null, selectedFig: null,
+        emission: "none", claim: "none",
+      };
+      const state = diag ? diag.anchorState(anchorId) : {
+        chosenCandidateId: null,
+        chosenDirection: local.chosenDirection,
+        selection: local.selection,
+        emission: local.emission,
+        claim: local.claim,
+      };
+      const snapshot = {
+        anchorId, num: info && info.num,
+        captionPage: pd.num, candidatePage: pd.num - 1,
+        currentSelection: state.selection,
+        currentChosenCandidateId: state.chosenCandidateId,
+        currentChosenDirection: state.chosenDirection,
+        currentEmission: state.emission,
+        currentClaimState: state.claim,
+      };
+      adjacentCaptionBySnapshot.set(snapshot, {
+        text: info && info.captionTextObserved_ || (cap && cap.s) || "",
+        box: info && info.captionBoxObserved_ || null,
+      });
+      return snapshot;
+    })).filter(snapshot => snapshot.currentClaimState !== "owned");
+  const adjacentOwnedClaims = allFigs.map(f => ({
+    candidateId: diag ? diag.figCandidateId(f) : null,
+    anchorId: diag ? diag.registerAnchor(
+      pageData[f.page - 1], f._anchor) : null,
+    num: f.num, page: f.page,
+    outputBoxPx: { x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1 },
+    outputBoxPt: adjacentPxBoxToPt({ x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1 }),
+  }));
+  /* 12-B resolver는 정규화 **전에** 돌려야 신규 방출 figure가 같은 필드 정규화와 suspectedMissing
+   * 재계산을 그대로 통과한다. 방출이 0건이면 이전 버전과 완전히 동일한 경로다. */
+  checkAborted();
+  const adjacentResolved = await observeAdjacentPages(
+    pageData, dom, diag, opts, checkAborted, adjacentSnapshots, adjacentOwnedClaims,
+    adjacentCaptionBySnapshot);
+  /* 중단 조건(F8): resolver는 기존 num을 건드리지 않는다 — 같은 num이 이미 방출됐으면 gate에서
+   * 걸러지므로 여기 도달하면 안 된다. 도달했다면 파일명 규칙까지 흔들리므로 즉시 실패시킨다. */
+  for (const fig of adjacentResolved) {
+    if (allFigs.some(f => String(f.num) === String(fig.num)))
+      throw new Error(`PB-4B 12-B 중단: num ${fig.num}이 이미 방출됨 (replace는 12-C 잠금)`);
+    allFigs.push(fig);
   }
   const figures = allFigs
     .sort((a, b) => a.page - b.page ||
@@ -2349,35 +3846,70 @@ async function extract(data, opts = {}) {
     delete f._anchor;   // soft floor 판정용 내부 태그 — 출력 미포함 (v2.14.0)
     f.confidence = 1.0; // 당분간 고정 (Margin FigureEntry.confidence 대응)
   }
-  /* 후처리: 번호 공백 추론 — 감지된 정수 번호 1..최대 중 빠진 번호 = 미탐지 의심.
-   * 부록 번호("A.1", "B.2")·로마숫자는 1부터 시작한다는 가정이 안 통해 제외. (Dong-2025 유래) */
   checkAborted(); // 마지막 페이지 렌더 중 abort돼도 완료 결과를 반환하지 않도록 최종 체크
+  /* 후처리: 번호 공백 추론 — resolver 이후의 최종 figures만 읽어야 stale이 되지 않는다.
+   * 부록 번호("A.1", "B.2")·로마숫자는
+   * 1부터 시작한다는 가정이 안 통해 제외한다. (Dong-2025 유래) */
+  checkAborted();
   const intNums = new Set(figures.map(f => String(f.num)).filter(n => /^\d+$/.test(n)).map(Number));
   const suspectedMissing = [];
   if (intNums.size) {
     const maxN = Math.max(...intNums);
     for (let n = 1; n <= maxN; n++) if (!intNums.has(n)) suspectedMissing.push(String(n));
   }
+  if (diag) {
+    diag.add("document-end", {
+      decision: "complete", numPages: pdf.numPages, scannedPages: nPages,
+      emittedFigures: figures.length, suspectedMissing,
+    });
+    diag.finish();
+  }
   return { title, numPages: pdf.numPages, figures, suspectedMissing, engineVersion: VERSION };
 }
 
 /* ===================== 크롭 헬퍼 ===================== */
-/* 스캔 루프 안에서 페이지 캔버스로부터 그림 영역만 잘라낸다 — 페이지 캔버스는 보관하지 않는다 (#12) */
-function makeCrop(pageCanvas, f) {
+/* 스캔 루프 안에서 페이지 캔버스로부터 그림 영역만 잘라내 **즉시 PNG로 직렬화**한다 (v2.19.1, B7).
+ * 캔버스로 들고 있으면 문서 스캔이 끝날 때까지(수십 초) Chrome이 백킹 스토어를 회수할 수 있는
+ * 상태로 남는다 — 실제 전수 실행에서 그 창 동안 한 논문 크롭 전량이 백지가 됐다. PNG 문자열은
+ * 평범한 JS 데이터라 회수 대상이 아니고, 압축돼 있어 논문당 상주도 130MB → 수MB로 떨어진다. */
+function makeCropPng(pageCanvas, f) {
   const cw = f.x1 - f.x0, ch = f.y1 - f.y0;
+  /* 기하 사전조건 — 도달 불가여야 한다(최소 크기 30px 필터·furniture 클램프). 일반 Error로 두는
+   * 게 중요하다: FigRenderError로 던지면 배치 러너가 메모리 압력으로 오인해 논문마다 Chrome을
+   * 재시작하고, 결정적 기하 버그가 일시적 장애로 위장된다. */
+  if (cw <= 0 || ch <= 0) throw new Error(`크롭 영역이 비어 있습니다 (${cw}×${ch})`);
   const c2 = document.createElement("canvas");
   c2.width = cw; c2.height = ch;
   const ctx = c2.getContext("2d");
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cw, ch);
   ctx.drawImage(pageCanvas, f.x0, f.y0, cw, ch, 0, 0, cw, ch);
-  return c2;
+  /* 카나리아: 흰 배경을 칠했으므로 살아 있는 캔버스라면 (0,0)은 반드시 불투명하다. 1픽셀로
+   * 충분한 이유는 호출부(페이지 루프) 주석 참고 — makeInk 이후 여기까지 await가 없다. */
+  if (ctx.getImageData(0, 0, 1, 1).data[3] !== 255)
+    throw figRenderError(`크롭 캔버스가 비어 있습니다 (${cw}×${ch} — 메모리 부족으로 캔버스가 회수됐을 수 있습니다)`);
+  const png = c2.toDataURL("image/png");
+  c2.width = 0; c2.height = 0;   // 백킹 스토어 즉시 반환
+  return png;
 }
-/* v2.5.1: 크롭은 스캔 중 이미 생성됨 — 아래 셋은 f.cropCanvas를 읽는 접근자 (시그니처 불변) */
-const cropCanvas = f => f.cropCanvas;
-const cropDataURL = f => f.cropCanvas.toDataURL("image/png");
-const cropBlob = f => new Promise(res => f.cropCanvas.toBlob(res, "image/png"));
+/* v2.19.1: 크롭은 스캔 중 PNG data URL로 직렬화된다 — 아래 둘은 `f.cropPng_`를 읽는 접근자.
+ * `cropCanvas` 접근자와 `figure.cropCanvas` 필드는 제거됐다 ([BREAKING], B7) — 크롭 캔버스를
+ * 문서 끝까지 살려 두는 구조 자체가 결함의 원인이었다. */
+const cropDataURL = f => {
+  if (typeof f.cropPng_ !== "string")
+    throw new Error("크롭 이미지가 없습니다 — extract를 cropImages:false(진단 전용)로 호출했습니다.");
+  return f.cropPng_;
+};
+/* base64를 직접 디코드한다 — `fetch(dataUrl)`가 한 줄이고 off-thread지만, 유일한 소비자인
+ * Margin은 확장 CSP(connect-src) 아래라 data: fetch가 막힐 수 있다. 바이트는 동일하다. */
+const cropBlob = async f => {
+  const url = cropDataURL(f);
+  const bin = atob(url.slice(url.indexOf(",") + 1));
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return new Blob([buf], { type: "image/png" });
+};
 
-return { VERSION, extract, cropCanvas, cropDataURL, cropBlob, isCaption, isTableCaption, buildLines };
+return { VERSION, extract, cropDataURL, cropBlob, isCaption, isTableCaption, buildLines };
 
 })();
 

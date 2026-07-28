@@ -104,13 +104,20 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
 5. `tab-figures.ts`에서 `error.name === 'FigRenderError'`를 분기해 "메모리가 부족했을 수 있어요 —
    다시 시도해 주세요" 문구를 노출 (현재는 일반 실패 문구 + 재시도 버튼).
 
-### 벤더링과 무관한 선재 결함 (지금도 유효)
+### 벤더링과 무관한 선재 결함
 
-- **`tab-figures.ts`에 `AbortController` 배선이 없다.** §취소가 "호스트는 문서 교체 시 반드시 signal을
-  abort해야 한다"고 요구하는데 `#scan()`은 `signal`을 넘기지 않는다. `setDocument`는 `#scanGeneration`을
-  올려 **결과만 버리고 작업은 안 멈춘다**. 문서를 빠르게 갈아타면 스캔 두 개가 동시에 돌아 크롭 세트가
-  두 벌 상주한다 — 백로그 B7이 기술한 메모리 압력을 호스트가 스스로 만들고 있다.
-  **엔진 버전과 무관하게 지금 v2.14.0에서도 유효한 결함**이라 벤더링을 기다릴 이유가 없다.
+- ~~`tab-figures.ts`에 `AbortController` 배선이 없다~~ → **해소 (#34)**. `setDocument`가 진행 중인
+  스캔을 실제로 abort하고, `#scan`이 엔진에 `signal`을 넘긴다. 취소로 인한 거절은 정상 흐름이라
+  에러 UI를 띄우지 않는다(엔진이 던지는 이름에 기대지 않고 `signal.aborted`만 본다).
+  abort가 `setDocument`에만 있는 이유는 **문서 교체만이 진행 중인 스캔을 무효화하는 사건**이기
+  때문이다 — 재시도는 종료 상태 `'error'`에서만 진입하므로 그때 취소할 스캔이 없다.
+  - **취소는 협조적이므로 중첩이 0이 되는 것은 아니다**: 엔진은 페이지 경계의 `checkAborted()`와
+    진행 중 렌더의 `RenderTask.cancel()`에서만 멈춘다. 문서를 바꾼 뒤에도 나가는 스캔이 **약 1페이지
+    분량**(페이지 캔버스 1장 + 그 페이지까지의 크롭)을 더 들고 있을 수 있다. "스캔 두 개가 끝까지"
+    대비 이득이 목적이고, 0이 목표가 아니다.
+- **이전 `PDFDocumentProxy`를 `destroy()`하지 않는다** (#35). `PdfHost.#setDocument`가 `#doc`을
+  덮어쓸 뿐이라 한 세션에서 문서를 N번 열면 N개가 상주한다. **#34보다 큰 압력원**이다(문서를 열수록
+  단조 증가). v2.14.0에서는 크롭이 살아 있는 캔버스로 유지되므로 위 B7 실패에 직접 기여한다.
 
 ## 주의사항
 
@@ -128,6 +135,9 @@ const seeds = toFigureEntries(res, (p) => pageHeights[p]);
   문서 교체 시 이전 스캔 중단에 사용 (#12). v2.5.1+: abort 시 진행 중 페이지 렌더도 `RenderTask.cancel()`로
   즉시 중단 — 페이지 경계까지 기다리지 않는다. **호스트는 문서 교체 시 반드시 signal을 abort해야 한다**
   (엔진은 메커니즘만 제공 — signal 미전달 시 스캔이 끝까지 진행됨).
+  → Margin 측 배선 완료(#34): `FiguresTab.setDocument()`가 이전 스캔을 abort하고 `#scan`이 `signal`을
+  전달한다. **취소는 정상 흐름이므로 소비자는 `AbortError`를 에러 UI로 취급하지 말 것** — 문서를
+  바꿀 때마다 실패 메시지가 번쩍인다.
 - **크롭 이미지 수명/메모리** (#12 → 엔진 백로그 B7, **v2.19.1에서 재설계 · `[BREAKING]`**):
   크롭은 이제 스캔 중 **PNG로 즉시 직렬화**되고 캔버스는 그 자리에서 반환된다. `figure.cropCanvas`
   필드와 `cropCanvas()` 접근자는 **제거**됐고, 이미지는 `cropDataURL(fig)` / `cropBlob(fig)`로만 받는다

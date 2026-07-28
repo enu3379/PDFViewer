@@ -19,6 +19,8 @@ export class FiguresTab {
   #state: 'idle' | 'scanning' | 'done' | 'error' = 'idle';
   #figures: EngineFigure[] = [];
   #scanGeneration = 0;
+  /** 진행 중인 스캔의 취소 핸들 — 문서가 바뀔 때만 abort한다 (#34) */
+  #scanAbort: AbortController | null = null;
 
   constructor(
     list: HTMLElement,
@@ -43,6 +45,14 @@ export class FiguresTab {
 
   setDocument(doc: PDFDocumentProxy | null): void {
     this.#scanGeneration += 1;
+    /* generation만 올리면 이전 스캔의 **결과만** 버려지고 작업은 끝까지 돈다 — 문서를 빠르게
+     * 갈아타면 스캔이 중첩돼 크롭 세트가 두 벌 상주한다. 통합 규약 §취소가 요구하는 대로
+     * 실제로 중단시킨다 (#34).
+     * abort가 여기에만 있는 이유: **문서 교체만이 진행 중인 스캔을 무효화하는 사건**이다.
+     * 재시도(ensureScanned)는 종료 상태인 'error'에서만 진입 가능하므로 그때 in-flight 스캔은
+     * 없다 — 취소할 대상 자체가 없다. */
+    this.#scanAbort?.abort();
+    this.#scanAbort = null;
     this.#doc = doc;
     this.#state = 'idle';
     this.#figures = [];
@@ -54,29 +64,46 @@ export class FiguresTab {
   ensureScanned(): void {
     if ((this.#state !== 'idle' && this.#state !== 'error') || !this.#doc) return;
     this.#state = 'scanning';
-    void this.#scan(this.#scanGeneration);
+    const abort = new AbortController();
+    this.#scanAbort = abort;
+    void this.#scan(this.#scanGeneration, abort);
   }
 
-  async #scan(scanGeneration: number): Promise<void> {
-    const doc = this.#doc;
-    if (!doc) return;
-    this.#setStatus('figure 스캔 중…');
+  async #scan(scanGeneration: number, abort: AbortController): Promise<void> {
+    /* 취소·완료 어느 쪽으로 끝나도 #scanAbort를 정리해야 하므로 조기 반환도 try 안에 둔다.
+     * 밖에 두면 여기서 반환할 때 #scanAbort가 끝나지 않는 스캔을 계속 가리키고 #state가
+     * 'scanning'에 갇혀 재시도도 취소도 불가능해진다 (현재는 도달 불가하지만, 이 불변식은
+     * ensureScanned의 !this.#doc 가드에만 의존하게 두지 않는다). */
     try {
+      const doc = this.#doc;
+      if (!doc) return;
+      this.#setStatus('figure 스캔 중…');
       const result = await this.#engine.extract(null, {
         pdfDocument: doc,
+        signal: abort.signal,
         onProgress: (msg) => {
           if (this.#scanGeneration === scanGeneration) this.#setStatus(msg);
         }
       });
+      /* 취소된 스캔의 결과는 후임 문서의 탭에 그려져선 안 된다. 지금은 abort가 항상 generation
+       * 증가와 짝이라 아래 두 검사가 같은 집합을 막지만, generation을 올리지 않는 abort 지점
+       * (dispose·패널 닫기 등)이 나중에 생기면 성공 경로에만 구멍이 남는다 — 두 경로를 대칭으로
+       * 둔다 (#34). */
+      if (abort.signal.aborted) return;
       if (this.#scanGeneration !== scanGeneration) return;
       this.#figures = result.figures;
       this.#state = 'done';
       this.#render();
     } catch (error) {
+      /* 취소는 정상 흐름이다 — 에러 UI를 띄우면 문서를 바꿀 때마다 "실패했어요"가 번쩍인다.
+       * 엔진이 던지는 이름(AbortError·RenderingCancelledException…)에 기대지 않고 signal만 본다. */
+      if (abort.signal.aborted) return;
       if (this.#scanGeneration !== scanGeneration) return;
       console.error('figure 스캔 실패', error);
       this.#state = 'error';
       this.#setStatus('figure 스캔에 실패했어요.', true);
+    } finally {
+      if (this.#scanAbort === abort) this.#scanAbort = null;
     }
   }
 

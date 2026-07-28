@@ -122,7 +122,7 @@ export class PdfHost {
       docBaseUrl: url,
       isEvalSupported: false
     });
-    const doc = await this.#awaitLoad(loadingTask);
+    const doc = await this.#awaitLoad(loadingTask, seq);
     return this.#adopt(doc, seq, url);
   }
 
@@ -133,7 +133,7 @@ export class PdfHost {
       data,
       isEvalSupported: false
     });
-    const doc = await this.#awaitLoad(loadingTask);
+    const doc = await this.#awaitLoad(loadingTask, seq);
     return this.#adopt(doc, seq);
   }
 
@@ -155,12 +155,18 @@ export class PdfHost {
    * 띄우는데, 실패 시 pdf.js는 promise만 reject하고 task·worker를 회수하지 않는다 — 파일 없음·권한
    * 거부가 일상적인 UX라 실패 N번이 워커 스레드 N개로 쌓인다. 성공 경로는 #setDocument가 이전
    * 문서를 destroy할 때 함께 정리되므로 여기서 건드리지 않는다. */
-  async #awaitLoad(loadingTask: { promise: Promise<PDFDocumentProxy>; destroy(): Promise<void> }) {
+  async #awaitLoad(
+    loadingTask: { promise: Promise<PDFDocumentProxy>; destroy(): Promise<void> },
+    seq: number
+  ) {
     try {
       return await loadingTask.promise;
     } catch (error) {
       void loadingTask.destroy().catch(() => {});
-      throw error;
+      /* 이미 밀려난 로드의 **실패**도 화면에 띄우면 안 된다 (#35). 그대로 올려보내면 호출 측이
+       * 일반 오류로 처리해 figuresTab을 비우고 오류 화면을 띄우는데, 그 화면에는 사용자가
+       * 실제로 연 다른 문서가 떠 있다. 성공 경로의 #adopt와 같은 판정을 실패 경로에도 적용한다. */
+      throw seq !== this.#loadSeq ? new PdfLoadSupersededError() : error;
     }
   }
 

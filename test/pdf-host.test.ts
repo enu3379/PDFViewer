@@ -241,6 +241,40 @@ describe('PdfHost document lifecycle', () => {
     expect(viewerSetDocument).toHaveBeenLastCalledWith(fast);
   });
 
+  it('reports a late load FAILURE as superseded, not as an error (#35)', async () => {
+    const host = makeHost();
+    let failSlow!: (reason: Error) => void;
+    const taskDestroy = vi.fn(async () => {});
+    const fast = makeDoc('fast');
+
+    getDocument.mockReturnValueOnce({
+      promise: new Promise<PDFDocumentProxy>((_resolve, reject) => { failSlow = reject; }),
+      destroy: taskDestroy
+    });
+    const slowLoad = host.loadUrl('https://example.com/slow.pdf');
+    await load(host, fast);
+
+    failSlow(Object.assign(new Error('missing'), { name: 'MissingPDFException' }));
+
+    /* 원본 오류를 그대로 올려보내면 호출 측이 figuresTab을 비우고 오류 화면을 띄운다 —
+     * 그 화면에는 사용자가 실제로 연 문서가 떠 있다. superseded로 바꿔야 조용히 물러난다. */
+    await expect(slowLoad).rejects.toMatchObject({ name: 'PdfLoadSupersededError' });
+    await vi.waitFor(() => expect(taskDestroy).toHaveBeenCalledTimes(1));
+    expect(host.pdfDocument).toBe(fast);
+    expect(destroyOf(fast)).not.toHaveBeenCalled();
+  });
+
+  it('still reports a current load failure as a real error (#35)', async () => {
+    const host = makeHost();
+    getDocument.mockReturnValueOnce({
+      promise: Promise.reject(Object.assign(new Error('missing'), { name: 'MissingPDFException' })),
+      destroy: vi.fn(async () => {})
+    });
+
+    /* 밀려나지 않은 로드의 실패는 그대로 올라가야 한다 — 안 그러면 오류 화면이 영영 안 뜬다 */
+    await expect(host.loadFile(asFile())).rejects.toMatchObject({ name: 'MissingPDFException' });
+  });
+
   it('does not destroy a document that is being re-set as the same instance (#35)', async () => {
     const host = makeHost();
     const doc = makeDoc('same');

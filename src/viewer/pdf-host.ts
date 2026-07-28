@@ -40,6 +40,22 @@ type PdfHostElements = {
   viewer: HTMLDivElement;
 };
 
+/**
+ * 로드가 끝나기 전에 사용자가 다른 문서를 요청해 이 로드가 밀려났다는 신호 (#35).
+ * **오류가 아니다** — 호출 측은 화면을 건드리지 말고 조용히 물러나야 한다. 이걸 일반 실패로
+ * 처리하면 정상 로드된 새 문서 위에 오류 화면이 뜬다.
+ */
+export class PdfLoadSupersededError extends Error {
+  constructor() {
+    super('이 PDF 로드는 더 최신 로드로 대체되었습니다.');
+    this.name = 'PdfLoadSupersededError';
+  }
+}
+
+export const isLoadSuperseded = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null
+  && (error as { name?: unknown }).name === 'PdfLoadSupersededError';
+
 type PdfHostCallbacks = {
   onPageChange?: (page: number, pageCount: number) => void;
   onScaleChange?: (scale: number, presetValue?: string) => void;
@@ -52,6 +68,8 @@ export class PdfHost {
   readonly version = pdfjsVersion;
 
   #doc: PDFDocumentProxy | null = null;
+  /** 로드 요청 일련번호 — 완료 시점에 자기가 아직 최신인지 판별한다 (#35) */
+  #loadSeq = 0;
   #callbacks: PdfHostCallbacks;
 
   constructor(elements: PdfHostElements, callbacks: PdfHostCallbacks = {}) {
@@ -98,24 +116,38 @@ export class PdfHost {
   }
 
   async loadUrl(url: string): Promise<PDFDocumentProxy> {
+    const seq = ++this.#loadSeq;
     const loadingTask = getDocument({
       url,
       docBaseUrl: url,
       isEvalSupported: false
     });
     const doc = await this.#awaitLoad(loadingTask);
-    this.#setDocument(doc, url);
-    return doc;
+    return this.#adopt(doc, seq, url);
   }
 
   async loadFile(file: File): Promise<PDFDocumentProxy> {
+    const seq = ++this.#loadSeq;
     const data = new Uint8Array(await file.arrayBuffer());
     const loadingTask = getDocument({
       data,
       isEvalSupported: false
     });
     const doc = await this.#awaitLoad(loadingTask);
-    this.#setDocument(doc);
+    return this.#adopt(doc, seq);
+  }
+
+  /* 늦게 끝난 로드가 사용자가 **마지막으로 요청한** 문서를 밀어내지 않게 한다 (#35).
+   * 느린 URL(A)을 로드하는 중에 파일(B)을 드롭하면 B가 먼저 적용되는데, 그 뒤 A가 완료되면
+   * #setDocument(A)가 화면에 떠 있는 B를 destroy해 버린다 — 이 destroy는 이 PR이 추가한 것이라
+   * 여기서 함께 막는다. 밀려난 쪽은 방금 받은 자기 문서를 스스로 버리고 물러난다.
+   * (표시 상태·TOC·docData의 stale 갱신은 main.ts 레벨 문제라 #37에 남아 있다.) */
+  #adopt(doc: PDFDocumentProxy, seq: number, url?: string): PDFDocumentProxy {
+    if (seq !== this.#loadSeq) {
+      void this.#releaseDocument(doc);
+      throw new PdfLoadSupersededError();
+    }
+    this.#setDocument(doc, url);
     return doc;
   }
 

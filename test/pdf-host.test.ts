@@ -215,6 +215,32 @@ describe('PdfHost document lifecycle', () => {
     expect(host.pdfDocument).toBe(second);
   });
 
+  it('discards a late load instead of destroying the document the user actually opened (#35)', async () => {
+    const host = makeHost();
+    let releaseSlow!: (doc: PDFDocumentProxy) => void;
+    const slow = makeDoc('slow');
+    const fast = makeDoc('fast');
+
+    /* 느린 URL 로드(A)가 진행 중일 때 사용자가 파일(B)을 드롭하는 상황 */
+    getDocument.mockReturnValueOnce({
+      promise: new Promise<PDFDocumentProxy>((resolve) => { releaseSlow = resolve; }),
+      destroy: vi.fn(async () => {})
+    });
+    const slowLoad = host.loadUrl('https://example.com/slow.pdf');
+    await load(host, fast);
+    expect(host.pdfDocument).toBe(fast);
+
+    releaseSlow(slow);
+
+    /* 밀려난 로드는 오류가 아니라 "물러남" 신호로 끝나고, 자기가 받은 문서를 스스로 버린다 */
+    await expect(slowLoad).rejects.toMatchObject({ name: 'PdfLoadSupersededError' });
+    await vi.waitFor(() => expect(destroyOf(slow)).toHaveBeenCalledTimes(1));
+    /* 사용자가 마지막으로 요청한 문서는 살아 있고 화면에도 그대로다 */
+    expect(destroyOf(fast)).not.toHaveBeenCalled();
+    expect(host.pdfDocument).toBe(fast);
+    expect(viewerSetDocument).toHaveBeenLastCalledWith(fast);
+  });
+
   it('does not destroy a document that is being re-set as the same instance (#35)', async () => {
     const host = makeHost();
     const doc = makeDoc('same');

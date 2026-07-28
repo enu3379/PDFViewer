@@ -17,7 +17,7 @@ import type { Highlight, Memo, PenColor } from '../core/types';
 import { HighlightOverlay } from './overlay-highlights';
 import { FiguresTab } from './panel/tab-figures';
 import { MemoTab } from './panel/tab-memos';
-import { type FlatOutlineItem, PdfHost } from './pdf-host';
+import { type FlatOutlineItem, PdfHost, isLoadSuperseded } from './pdf-host';
 
 const PANEL_WIDTH_KEY = 'margin:panelWidth';
 const PANEL_MIN_WIDTH = 264;
@@ -281,6 +281,8 @@ async function loadUrl(file: string): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    /* 이 로드가 더 최신 로드로 밀려났다면 화면은 그쪽 것이다 — 건드리지 않고 물러난다 (#35) */
+    if (isLoadSuperseded(error)) return;
     figuresTab.setDocument(null);
     if (isLocalFile && isMissingPdfError(error)) {
       showMissingFileState(file);
@@ -306,6 +308,8 @@ async function loadSelectedFile(file: File): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    /* 이 로드가 더 최신 로드로 밀려났다면 화면은 그쪽 것이다 — 건드리지 않고 물러난다 (#35) */
+    if (isLoadSuperseded(error)) return;
     figuresTab.setDocument(null);
     setError(error);
   }

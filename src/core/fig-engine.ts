@@ -22,7 +22,7 @@ if (!globalScope.pdfjsLib) globalScope.pdfjsLib = pdfjs;
  * (아래 ⚠). 타입 ↔ 엔진 정합은 `docs/fig-extract-integration.md` §갱신 절차가 지키는 사람의 몫이고,
  * 핀은 "그 절차를 다시 읽어라"는 알람일 뿐이다.
  */
-export const VENDORED_ENGINE_VERSION = '2.19.4';
+export const VENDORED_ENGINE_VERSION = '2.26.1';
 
 /** pt 단위, 좌상단 원점 사각형 (엔진 좌표계) */
 export interface EngineBox {

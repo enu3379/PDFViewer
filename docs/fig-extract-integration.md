@@ -227,7 +227,7 @@ const entries = seeds.map((seed) =>
 
 1. 엔진 전용 별도 repo에서 새 버전 검증 완료 후 (엔진 repo `docs/DEV.md` §버전 릴리스 절차)
 2. **복사 전에 엔진 repo가 clean한지 확인** — `git -C <엔진repo> status --porcelain`이 비어 있어야 하고,
-   `git -C <엔진repo> rev-parse HEAD`로 SHA를 적어 둔다.
+   `git -C <엔진repo> rev-parse --short=7 HEAD`로 **7자리 SHA**를 적어 둔다.
    더티한 작업 트리를 복사하면 **어느 커밋에도 존재하지 않는 엔진이 벤더링되는데 두 파일 diff는
    0건이라 아무 검사에도 안 걸린다** — 나중에 그 코드를 되짚을 방법이 없어진다.
 3. `fig-extract.js`를 `src/core/`에 **그대로 복사** — v2.3.0부터 엔진 파일에 globalThis 노출이 포함되어
@@ -246,6 +246,8 @@ const entries = seeds.map((seed) =>
 7. `npm run typecheck && npm test && npm run build` 확인 후 그림·표 탭에서 샘플 PDF 1개 스모크 테스트
 8. 커밋 메시지에 엔진 버전과 **2에서 적어 둔 엔진 SHA**를 명시
    (예: `chore: bump fig-extract to v2.19.4` + 본문에
-   `engine: onetwothr1/PDFViewer-Figure-Extract@<복사 시점 HEAD SHA>`).
+   `engine: onetwothr1/PDFViewer-Figure-Extract@1783140`).
    엔진 repo는 알고리즘과 무관한 커밋(truth·docs)으로도 전진하므로 **버전 문자열만으로는 어느
    커밋을 복사했는지 특정되지 않는다** — 같은 v2.19.4가 여러 SHA에 걸쳐 있다.
+   **7자리로 적는다** — 추적에 필요한 것은 "어느 커밋을 복사했나"이고 이 저장소 규모에서
+   7자리면 충분히 유일하다. 충돌하면 git이 더 긴 약칭을 요구하므로 그때 늘리면 된다.

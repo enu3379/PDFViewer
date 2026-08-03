@@ -41,7 +41,159 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.19.4";
+const VERSION = "2.26.1";
+// 2.26.1: [계약 무변경] x 클램프의 `PARA_X_MIN_DELTA`를 12 → 2px. v2.26.0이 막았던 "방출
+//        여백(10px ≈ 4.55pt)만 깎는 발화" 54행 중 **51행이 `body_text_sliver` 보유**였다 —
+//        여백이 옆 컬럼 본문과 겹쳐 글자 조각이 들어와 있었고 4.6pt를 깎으면 그게 빠진다.
+//        막을 근거였던 두 위험은 최소 크기 바닥이 산술상 도달 불가이고 claim 기하는 미관측인
+//        데다 `clampedFromX_`로 이미 고쳐져 있었다. 5pt 미만은 자동 승계라 사람 눈에 안 닿으므로
+//        `carry-forward --bbox-tol`·review.html 승계 문턱 입력을 만들어 [사람]이 직접 확인했다.
+//        **v2.26.0을 대체하는 릴리스다** — v2.26.0 스냅샷은 판정 없이 남는다.
+// 2.26.0: [계약 무변경] **단락 x 클램프 + 컬럼 확정 완화**. v2.25.0은 상단만 줄였는데 실측
+//        잔여의 대부분은 **가로 초과**였다(Pylkkänen 1@2 좌 219pt · science-1247125 2@4 우 193pt ·
+//        rsc c9ta00701f 2@3 우 182pt — 전부 위쪽 초과 0~12pt). 영역 y범위와 겹치는 본문 단락의
+//        x구간을 상자에서 빼고 남은 조각 중 **그림 잉크가 최대인 것**을 남긴다. 상단 클램프와
+//        같은 계약(incl·점수·선택·dedup 불변, 상자만 축소)이고 순서가 설계의 일부다 — y를 먼저
+//        확정하고 그 y로 x를 잰다(반대로 하면 이미 정답인 x가 부서진다, Kane 3@3).
+//        컬럼 확정도 "캡션 중심을 품는 단락" → "캡션과 겹침이 최대인 단락 컬럼"으로 완화한다 —
+//        전폭 캡션에서 중심이 거터에 떨어져 규칙이 통째로 미발동하던 경로(Raby 1@1 위 502pt 방치).
+// 2.25.0: [계약 무변경] **본문 단락 기하 객체 + 단락 stop**. 본문 판별 단위를 줄에서 단락으로
+//        올린다. 지금 `stopper`는 줄 하나를 보고 "위아래 이웃이 있나"만 묻고 블록에는 x가 없어
+//        "이 본문이 내 영역을 가로막나, 옆 컬럼에 비켜 있나"를 물을 수 없다. dom 폰트 줄 중
+//        우단 일치(마지막 줄 제외) ∧ 줄간격 일정 ∧ 좌단 [여백, 여백+들여쓰기]인 묶음을 단락
+//        객체로 뽑아(`bodyParagraphs`) 자기 x 경계를 갖게 하고, BODY stop **뒤**에서 "캡션 컬럼을
+//        가로막는 단락"을 만나면 그 단락 아래에서 멈춘다. BODY가 멈추는 자리는 그대로라 상자를
+//        줄이는 방향으로만 작동한다. 가로막음의 분모는 밴드가 아니라 **단락이 알려주는 캡션
+//        컬럼**이다(밴드는 이미 가로 과포함돼 있을 수 있다 — Harley `2@3`). 그림 안 산문은
+//        모양으로 안 갈리므로 단락 자기 상자가 래스터 위·프레임 안·그림 잉크 위면 면제한다
+//        (Feng 부록 프롬프트 박스). **스캔 PDF는 대상이 아니다** — 페이지 전체가 래스터라
+//        전건 면제되어 무발동(종전 동작). 현대 PDF 개선을 우선한 의도된 보류.
+// 2.24.1: [계약 무변경] **table 본체 롤백을 BODY stop 경로와 공유 + 캡션→본체 첫 갭 문턱 분리**.
+//        롤백이 TABLE 분기 안에만 있어서, 표 캡션을 품은 블록에서 **BODY가 먼저 멈추면** 스캔은
+//        캡션에서 서는데 **이미 포함해 버린 표 본체가 그대로 남았다**(ICLR `2@6`·`B.1@22`,
+//        Stout `5@7` — 전부 `other_fig_merged`). ★ **멈추는 자리는 여전히 BODY가 먼저 정한다**
+//        (v2.10.0의 순서 의도 유지 — 본문 "Table 1. The results …" 오탐은 stopper로 BODY에서
+//        잡혀야 한다). 공유하는 것은 롤백뿐이고, 융합(`graphicInkRatio`)·컬럼 가드는 v2.24.0과
+//        동일하게 건다. 판정 재료 계산만 BODY 앞으로 옮겼고 STOP 순서는 불변이다.
+//        ★ **첫 갭만 따로 연다**(`TABLE_CAP_GAP_PT`=20): 롤백을 옮기기만 하면 세 사례 모두
+//        **첫 갭에서 즉시 abort**한다. 조판상 캡션↔표 본체 간격이 표 내부 행 간격보다 넓기 때문 —
+//        실측 첫 갭 9.1·17.3·17.3pt ↔ 내부 5.5~11.8pt ↔ 종결 갭 24.5·30.0·35.5pt로 (17.3, 24.5)가
+//        비어 있다. **내부 문턱 `TABLE_GAP_PT`(15pt)는 불변**이라 기존 TABLE 경로의 run 판정은 그대로다.
+//        ★ `farBoundary`: 롤백이 있으면 헬퍼가 잡은 "제거된 첫 블록의 하단"이어야 한다 — `b1`로
+//        덮으면 `farBlankPx`가 표 높이만큼 부풀어 `farClosed` 판정이 뒤집힌다.
+//        전수 diff **ADDED 0 · REMOVED 0 · MOVED>5pt 6 · 서브5pt/payload 0** · 추출 오류 0 ·
+//        크롭 픽셀 의심 0. 게이트 G0·G1·G2 통과(`sCritical` 불변, `sPerceived` gate +0.0024 ·
+//        all +0.0013, `criticalFlow` 전 축 0, **악화 0**): ICLR `2@6`·`B.1@22` minor→**ok**,
+//        Rajagopal `1@3`·`2@4` cosmetic→**ok**, Stout `5@7` minor→cosmetic, Aegaeon `15@12` minor→ok.
+//        Blockchain `21@55`·Aegaeon `8@8`(융합 블록 abort)·Park `2@5`는 무변화.
+// 2.24.0: [계약 무변경] **table 캡션 경계의 융합 판정을 프록시→실측으로 교체 + 컬럼 가드**.
+//        v2.10.0은 "캡션이 figure와 융합됐나"를 **블록 높이 ≤ 60pt**로 쟀는데, 프록시라서 융합 상대가
+//        **표 자신**일 때도 막혔다(Varghese 4@7: 표+표캡션이 159.5pt·텍스트 56줄 한 덩어리 →
+//        `nstop=0`이라 BODY도 못 잡고 표가 figure 영역에 통째로 남음). 취지를 직접 재는 축인
+//        **그림 잉크**(`graphicInkRatio ≤ 0.10`)로 **교체**했다 — OR로 얹지 않았다. 근거: v2.10.0 규칙이
+//        실제 발동한 블록 15건의 graphic이 **전부 정확히 0**(높이 5~18.6pt·텍스트 1~2줄)이라 높이가
+//        통과시키던 블록은 그림 잉크 조건도 빠짐없이 통과한다 — "≤60pt인데 graphic>0.10"인 교집합이
+//        코퍼스에 공집합이다. 문턱은 Varghese 표 덩어리 0.0375 ↔ Aegaeon 8@p8 융합 덩어리 0.201·0.365의
+//        5.4배 빈 구간 아래쪽. 마스크가 없으면(페이지 잉크 0) 미발동 — 회수된 캔버스에서 잉크가 0으로
+//        읽혀 면제가 전건 발동하는 것을 막는다(v2.20.0 잉크 하한과 같은 취지).
+//        ★ 같이 넣은 **컬럼 가드**: 표 캡션 줄이 **캡션 자신이 속한 본문 컬럼**과 겹칠 때만 경계로 쓴다.
+//        없으면 옆 컬럼 표가 같은 높이라는 이유만으로 figure 상단을 자른다 — ieee tpel `29@11` 실측:
+//        왼쪽 컬럼 `TABLE VII`(x144–182)가 오른쪽 컬럼 figure(truth x307–546 y62–242)의 위 75pt를 잘랐다.
+//        v2.23.0에서 안 그랬던 것은 그 블록이 60.5pt로 높이 가드를 **간발로** 넘겨서였을 뿐이다.
+//        컬럼을 모르면 종전대로 전부 인정 → 좁히는 쪽으로만 작동(실패 방향 = "표를 못 뺀다").
+//        전수 diff **ADDED 0 · REMOVED 0 · MOVED>5pt 2 · 서브5pt/payload 0**. 게이트 G0·G1·G2 통과
+//        (`sCritical` 불변, `sPerceived` bench +0.0013 · all +0.0009, criticalFlow 전 축 0, 악화 0):
+//        Varghese `4@7`·Kumar-2021 `6@8` **minor→ok**(표 제거로 정답 근사), Aegaeon `15@12` minor→ok.
+//        v2.10.0 유래(Blockchain·Structural·Park)·Aegaeon `8@p8` 전부 무변화.
+// 2.23.0: [계약 무변경] **컬럼 인식 블록 분할 — 기각 전용**. 블록 경계는 "밴드 폭 **전체**에 걸친
+//        빈 행 4.8pt 연속"으로 정하는데, 다단 조판은 좌우 컬럼의 줄 간격이 어긋나 전폭 빈 행이
+//        거의 없다 → 제목·그림·양쪽 본문이 **단일 블록 하나**가 되고, 본문/그림 판정은 블록 단위
+//        질문이라 답할 수단이 사라진다(Viswanathan-1996 p1: 빈 행 전폭 228 ↔ 컬럼별 455/370).
+//        그래서 dom 폰트 줄의 x점유로 본문 컬럼을 추정하고(`bodyColumns`), 캡션이 속한 컬럼 안에서
+//        빈 행을 다시 세어 재분할한다. 부속 두 가지가 없으면 이 재분할은 손해다:
+//          · **바깥 경계 복원** — 컬럼 프로파일은 "어디서 자를지"만 정하고 각 블록의 y 범위는
+//            밴드 잉크로 되돌린다(상한 = 밴드 프로파일 블록). 없으면 블록 하한이 밀려 `gapPt`가
+//            흔들리고 **방향 선택이 뒤집힌다**(PRLett `5@5` up 10.36→9.18 → left 채택, IoU 1.000→0.028).
+//          · **자투리 되붙이기** — SEP보다 얇고 같은 밴드 블록에서 나온 조각은 잔재로 보고 합친다.
+//            없으면 헤더가 "글자 줄 보유분"과 "잉크 잔재"로 갈려 후자가 헤더 판정(`bl.length` 요구)을
+//            빠져나가 figure에 포함된다(Pohl `1@2` x466→x566, 같은 지문 105행).
+//        ★ **채택 조건은 `incl === 0 && stop === "body"` 하나뿐이다** — "캡션 자기 컬럼 바로 위가
+//        본문 = 이 앵커 위에 figure가 없다". 이 갈래는 **상자를 만들거나 바꿀 수 없고 후보를 지울
+//        뿐**이라 아래 손해가 구조적으로 불가능하다. 블록이 하나라도 남으면 컬럼 시야가 영역의 끝을
+//        정하기 시작하는데, 그 시야는 **캡션 컬럼 밖을 못 봐서** 거기에만 있는 figure 내용을 빈 행으로
+//        읽고 잘라낸다 — [사람] 육안 판정 실측: Blockchain `10@29`·Marchesi `ED.9@36`(우상단 벗겨짐),
+//        Luques `4@8`·Parmar `5@9`(우하단), Harley `2@3`(clip), DeCasper `1@2`(이동).
+//        실효 표적은 **본문 속 줄바꿈 꼬리 유령 앵커**다(앞 줄이 "…see"로 끝나고 `Fig. 1.`이 다음 줄
+//        선두에 홀로 떨어진 것). 전폭에서는 그 위 본문 줄이 **0개**로 읽혀 영영 안 잡히고 컬럼에서는
+//        35개다. 전수 diff ADDED 0 · REMOVED 1 · MOVED>5pt 2 · 서브5pt/payload **0**(나머지 327편
+//        상자 완전 불변). 게이트 G0·G1·G2 통과(sCritical 전 스코프 불변, sPerceived all +0.0005,
+//        앵커 악화 0): acs `10@9` minor→**ok**, Viswanathan `1@1` critical `wrong_region`→`clipped`,
+//        science-245 `1@2` critical `clipped`→`not_detected`(뒤 둘은 태그 이동, 지표 중립).
+// 2.22.0: [계약 무변경] **패널형 soft 캡션 앵커** — 번호와 캡션 본문 사이에 **띄어쓴** 서브패널
+//        라벨이 오는 표기를 soft 후보로 인정한다(`softPanelBody`). SOFT_BODY_RE는 패널문자가 번호에
+//        **붙어 있을 때만**("Fig. 2a Setup") 관용하고 뒤 본문의 대문자 시작을 요구하는데, 실제 관습
+//        셋은 전부 패널문자 앞에 공백이 있고 그중 하나는 본문이 소문자라 그 방어선이 무력하다:
+//          F1 Nature 1990s "FIG. 3 a, Variation in …"
+//          F2 Springer     "Fig. 5 a UV–Vis graphs; b Diagram of transmittance …"
+//          F3 Springer     "Fig. 8 a isothermal nitrogen …, b pore size distribution …"
+//        공백을 허용하는 대신 **증거 둘 중 하나**를 요구한다 — ① 패널문자 직후 쉼표 + 본문 머리
+//        (대문자·괄호·따옴표·숫자) ② 같은 줄의 **구분자 + 다음 패널문자**이고 그 사이가 실제 본문
+//        (어절 ≥2). 둘 다 라인선두 상호참조에는 없다. **후보만** 늘리므로 문서 게이트(hardBody
+//        3-체제 라우터)가 2차 방어선으로 남고, hardBody·bareForms 집계는 건드리지 않는다.
+//        자간분리 경로는 미적용(공백을 지우면 ②의 어절 경계가 소실).
+//        유래: Tilman-1996(**앵커 0 = 전문서 사망**)·Viswanathan-1996·Hedenquist-1994·Fujita-1995(F1),
+//        springer s10854(F2)·s10934(F3). Fujita `2@2`("FIG. 2 1H NMR" 숫자 시작 본문)는 범위 밖.
+//        ⚠ hard 경로(구분자 있는 "Figure 2a.")는 **의도적으로 미포함** — 코퍼스 witness 0인데
+//        적대 리뷰가 실측 비용 3건(앵커 손실 "Fig. 1.2a", num 정체성 `1`→`1.2`, "Fig. 2 e.g. …"류
+//        오탐)을 냈다. 상세는 CAP_RE 위 주석. ⚠ 남는 사각도 그 주석에 명시(패널마다 소문자 술어가
+//        붙는 상호참조는 F3와 표면이 같아 통과한다).
+// 2.21.1: [행동 무변경][계약 무변경] **진단 전용 계측만 추가** — up 스캔 blockTrace에 `rowProfile`
+//        (블록 행별 잉크를 `grid.textMask_` 기준으로 txt=글자상자 안 / gfx=밖으로 분해, bin =
+//        `round(2×S)` = 4px = 1.818pt, 행 범위는 `graphicInkRatio`와 같은 배타 `b0 ≤ y < b1`)과
+//        `innerGaps`(블록 **내부**의 빈 행 구간 목록, 긴 것 12개)를, 후보 레코드에 `bandStats`
+//        (밴드 x범위·thr·rcap 행수·빈 행 수 + **밴드 전체 0~rcap의 행별 잉크 분해**)를 싣는다.
+//        밴드 단위 프로파일이 따로 필요한 이유: 블록 단위만으로는 블록 **사이**와 스캔이 stop으로
+//        끊겨 도달하지 못한 위쪽이 비어 뷰어 막대가 끊긴다. 목적은 review.html 심층 조사 모드가
+//        "엔진이 이 페이지를 어떻게 봤나"를 **재계산 없이** 그리게 하는 것이다 — 뷰어가 픽셀을 다시
+//        세면 headless↔GPU 래스터 차이로 thr 근처 판정이 갈린다(EVAL §10.12).
+//        `gfx`의 블록 합/상자면적 = 기존 `graphic`(graphicInkRatio)이고 `txt+gfx` = 빈 행 판정 입력
+//        `prof[y]`다 — 새 규칙·새 문턱 없이 **기존 판정량의 해상도만 올린 것**이다. 그 항등식이
+//        성립하려면 행 범위가 `graphicInkRatio`와 같은 배타(`b0 ≤ y < b1`)여야 한다.
+//        같이 `emission.peeledFromY0Pt`(기존 `peeledFromY0`은 렌더 px라 기하 용도로 못 쓴다)를 추가.
+//        ⚠ `rowProfile`이 record에 들어가므로 `decisionSemanticSha256`은 **의도적으로 바뀐다** —
+//        이 릴리스의 무변경 증거는 그래프 해시가 아니라 **manifest 전수 diff 단독**이다.
+//        전부 `diag && grid.textMask_` 게이트 뒤에 있어 `--graph` 없는 실행에는 존재하지 않는다
+//        (정상 실행 비용 0). 감지 로직·공개 출력 무변경 — 전수 manifest diff 0건으로 확인.
+// 2.21.0: [행동 변경][계약 무변경] 경계 벗기기 — 영역의 **가장 바깥 블록**이 남의 텍스트(러닝헤더·
+//        섹션 제목·본문)면 방출 상자에서 뺀다. 방출 상자가 사각형이라 바깥 블록만 경계를 바꾼다.
+//        전수 285행/69편에서 발동하고 태그 구성은 `over_margin` 181 · `header_included` 64 ·
+//        `body_text_sliver` 37 · 무태그 32 · `body_text_heavy` 15 · 기타 14다 — 실체는 **여백·머리글·
+//        슬리버 교정**이다. `body_text_heavy`에는 21%만 닿으므로 "본문 과포함 해결"이 아니다:
+//        그 코호트는 6갈래 이질 집합이고 나머지는 DEV.md 백로그로 남긴다. truth bbox가 있는 284행
+//        기준 ΔIoU 합 **+10.95**, 악화 **2행**(NBER-Experiential `2@18` ok −0.118 · `1@22` cosmetic). 규칙 = 고정폭 아님 ∧ (`graphicRatio
+//        ≤ 0.002` ∧ (블록 하단 ≤ 56pt ∨ 아래 갭 ≥ 20pt)) ‖ (`domShare ≥ 0.5` ∧ `graphicRatio ≤ 0.05`
+//        ∧ 그림 증거 없음 ∧ 갭 ≥ 10pt). 핵심 축은 **아래 갭** — figure 자신의 라벨 줄은 그림에 붙어
+//        있고(중앙 6pt) 남의 텍스트는 떨어져 있다(12~17pt). ★ **점수·선택에 관여하지 않는다**:
+//        `incl`을 건드리지 않고 `ry0`도 그대로 두어 metrics·score·후보 선택이 전부 불변이고,
+//        dedup 순위 입력 `h_`도 벗기기 전 값을 유지한다 — 방출 상자만 줄인다(ΔIoU 시뮬레이션이
+//        측정한 것이 정확히 그것이다). 텍스트 잉크 마스크는 페이지당 한 장을 만들어 이 규칙과
+//        `textListingRejects`가 공유한다(두 장 동시 상주 시 `--jobs 2`에서 캔버스 회수로
+//        `FIG_RENDER_ERROR` 10편 실측). 잉크 0인 페이지에서는 마스크를 만들지 않는다(B7 — 회수된
+//        캔버스에서 모든 후보 상단이 잘리는 것을 막는다).
+// 2.20.0: [행동 변경][계약 무변경] SI 목록 페이지 거부. 보충자료 캡션 목록 페이지("Figure S1 …" 나열)를
+//        여러 앵커가 나눠 잘라 figure로 방출하던 FP 19행(PLOS pbio p23·p24 · Edgecomb p14 ·
+//        springer s11427 p13)을 막는다. 판정은 **페이지 스코프**다 — `graphicRatio ≤ 0.01`
+//        (렌더 잉크 − 디센더 보정 텍스트 줄 상자) ∧ 고정폭 조판 아님을 **같은 페이지에서 3개 이상의
+//        선택 후보가 동시에** 만족하면 그 후보들을 dedup 앞에서 거부한다. 영역 하나만 보는 앞선 설계는
+//        텍스트로만 된 진짜 figure(FASTA 리스팅 — 비례 글꼴)를 원리상 구제하지 못해 중단됐다.
+//        12-B N−1 경로에 대칭 적용해 same-page 거부가 앵커를 승격시켜 새는 뒷문을 닫는다.
+// 2.19.5: [행동 변경][계약 무변경] 12-B `captionCompetition` 가드를 진단 독립으로 교정. 경합 판정이
+//        `targetAnchors[].anchorId`(= `diag ? registerAnchor(...) : null`) 목록 길이로 계산돼
+//        `.filter(Boolean)`이 진단 없는 구성에서 목록을 비웠고, 그 결과 12-B 7조건 AND 게이트의
+//        `unclaimed` 입력이 **소비자(Margin)에서 영구히 꺼진 채** `--graph`에서만 켜졌다
+//        (`Towards an AI co-scientist` 51 vs 49 방출). 판정 근거를 진단 무관 값 `num`으로 바꿔
+//        두 구성을 일치시킨다 — anchorId 목록은 record 추적용으로만 유지. 방향은 **가드 복원**이라
+//        진단 구성이 정본이고, results/·truth 판정·게이트 점수가 기술하던 동작이 그대로 public이 된다.
 // 2.19.1: [BREAKING] 죽은 캔버스 내성 (백로그 B7 — 전수 배치 비결정성의 근본 원인). Chrome은 메모리
 //        압력을 받으면 캔버스 백킹 스토어를 예외 없이 회수하는데, 회수된 캔버스는 모든 그리기가
 //        무성과로 끝나고 읽으면 전면 투명이다. makeInk가 알파를 무시해 이걸 "잉크 100% 페이지"로
@@ -247,6 +399,17 @@ const LEADING_S_CAP_RE2 = /^S(\d+)(?:figure|fig)\.?([.:|]|$)/i;
 /* 기본 캡션 정규식: "Figure 1:" "Fig. 2." "Fig. 3 |" "FIGURE 4" "Figure A.1:" "Figure A1." "Fig. S1." "Figure IV." 등.
  * v2.11.0: 번호 뒤·구분자 앞에 괄호 한정구 `(...)`(≤24자) 옵션 그룹 추가 (M2 — "FIG. 3 (color online)."·
  * Penn "Figure 1 (Gardner)."). 그룹 = [1]라벨 [2]번호 [3]괄호내용(선택) [4]구분자. 괄호 가드는 matchCaption. */
+/* ⚠ v2.22.0에서 여기에 패널 라벨 옵션 그룹(`Figure 2a.`)을 넣었다가 **되돌렸다**. 적대 리뷰가 낸
+ * 실측 3건이 근거이고, 셋 다 코퍼스 witness 0인 층이 치른 비용이다:
+ *   ① 앵커 손실 — "Fig. 1.2a"가 OLD `1` → NEW null. 정규식은 탐욕적으로 num=1.2/panel=a/sep=$로
+ *      성공하고, "패널이면 hard 구분자 필수" 가드가 **매치 성공 이후** 코드에서 기각해 엔진이
+ *      panel 없는 대안 파스(num=1/sep=.)로 되돌아갈 기회를 없앤다.
+ *   ② num 정체성 변화 — "Fig. 1.2a."가 `1` → `1.2`. 계약상 Margin의 `fig{num}-p{page}` 키가 바뀐다.
+ *   ③ 라인선두 상호참조 신규 오탐 — "Fig. 2 e.g. …" `2`, "Fig. 3 c. 1990 …" `3`, "Fig. 4 p. 34 …" `4`.
+ *      (`e.g.`·`i.e.`·`c.`(circa)·`p.`가 전부 "단일 소문자 + hard 구분자" 형태다.)
+ * 게다가 이 앵커들은 `info.hard=true`라 soft 문서 게이트의 `hardBody`를 올려 같은 문서의 soft 앵커를
+ * 전멸시킬 수 있다(v2.11.0 family 제외가 막았던 것과 같은 기제). 실표적은 전부 soft 경로이므로
+ * (softPanelBody) hard 층은 witness가 관측될 때 다시 설계한다. */
 const CAP_RE  = new RegExp(String.raw`^(${LABEL})\s*\.?\s*(${NUM_CLASS})\s*(?:\(([^)]{1,24})\)\s*)?([.:|]|$)`);
 // 공백 제거 버전: PDF.js가 small-caps를 "F IGURE 2"처럼 조각내는 경우 대응
 const CAP_RE2 = new RegExp(String.raw`^(${LABEL})\.?(${NUM_CLASS})(?:\(([^)]{1,24})\))?([.:|]|$)`);
@@ -264,6 +427,33 @@ const SOFT_BODY_RE2 = /^(?:[a-z](?:[–—-][a-z])*)?[A-Z(\[“‘"•]/;
 /* 공백 제거 경로는 자간 분리 라벨(Wiley "F I G U R E")에만 허용 — 무제한 허용하면
  * "Figure 2B is a composite" 류가 어절 경계 소실로 통과한다. */
 const SOFT_SPACED_RE = /^(?:[A-Za-z]\s){3,}/;
+/* ---- 패널형 soft 캡션 (v2.22.0): 번호와 캡션 본문 사이에 **띄어쓴** 서브패널 라벨이 오는 관습.
+ *   F1 Nature 1990s : "FIG. 3 a, Variation in the 0- and H-isotope …"      (패널문자 직후 쉼표)
+ *   F2 Springer     : "Fig. 5 a UV–Vis graphs; b Diagram of transmittance …"
+ *   F3 Springer     : "Fig. 8 a isothermal nitrogen adsorption …, b pore size distribution …"
+ * SOFT_BODY_RE는 패널문자가 번호에 **붙어 있을 때만**("Fig. 2a Setup") 관용하고, 그 뒤 본문이
+ * 대문자로 시작할 것을 요구한다. 위 셋은 전부 패널문자 앞에 공백이 있어 그 선행 그룹(^앵커)이
+ * 공백을 못 넘고, **F3는 본문이 소문자라 "대문자 시작" 방어선 자체가 성립하지 않는다** —
+ * 라인선두 상호참조 "Fig. 8 a shows …"와 표면이 같아진다. 그래서 공백을 허용하는 대신
+ * **다른 증거 둘 중 하나**를 요구한다(둘 다 상호참조에는 없다):
+ *   ① 패널문자 직후 쉼표 **+ 캡션 본문 시작** — F1 "a, Variation …"·"a, 1H NMR …".
+ *      ★ 쉼표만 요구하면 패널 나열형 상호참조가 통째로 들어온다(적대 리뷰 실측):
+ *        "Fig. 1 a, b show the two limiting cases" · "Fig. 2 a, b, and c show the trends" ·
+ *        "Fig. 5 a, b were measured at 300 K; c, d at 77 K". 그래서 쉼표 뒤에 SOFT_BODY_RE와 같은
+ *        본문 머리(대문자·괄호·따옴표)를 요구하고, **숫자 시작도 허용**한다(Fujita "a, 1H NMR").
+ *   ② 같은 줄의 **구분자 + 다음 패널문자** — F2·F3 "…; b Diagram"·"…, b pore size".
+ *      ★ 다음 패널문자 앞 구분자(`, ; .`)를 요구하는 것이 핵심이다. 없이 "다음 글자가 어딘가
+ *        있으면"으로 두면 "Fig. 4 a and b show the two cases"가 그대로 통과한다.
+ *      ★ 그 구분자까지의 구간이 **실제 본문이어야** 한다(어절 2개 이상). 없으면 위 나열형이
+ *        ①을 조여도 ②로 새어 들어온다("a, b show …"는 구간이 빈 문자열).
+ * 승격이 아니라 **후보 생성**만 넓힌다 — 문서 게이트(promoteSoftAnchors)가 2차 방어선으로 남는다.
+ * 자간분리(공백 제거) 경로에는 적용하지 않는다: 공백을 지우면 ②의 어절 경계가 소실돼 증거가
+ * 성립하지 않고(",bpore"), ①만 남는 형태는 코퍼스 witness가 0이다.
+ * ⚠ **남는 사각(의도적)**: "Fig. 2 a shows the XRD pattern, b shows the SEM image"처럼 패널마다
+ *   소문자 술어가 붙는 상호참조는 F3와 표면이 같아 통과한다. 동사 사전 없이는 못 가르며, 문서
+ *   게이트와 판정이 최종 방어선이다 — 이 규칙이 상호참조를 전부 막는다고 읽으면 안 된다. */
+const SOFT_PANEL_LEAD_RE  = /^\s+([a-z])(?:\s*[–—-]\s*([a-z]))*(?![A-Za-z])/;
+const SOFT_PANEL_COMMA_RE = /^\s*,\s*[A-Z0-9(\[“‘"•]/;
 const SOFT_FORM_MIN     = 2;   // 같은 라벨폼이 문서 내 반복돼야 하는 최소 횟수
 /* soft 문서 게이트 라우터 (v2.14.0) — hardBody(= 본문 figure hard 관습 증거) 기준 3-체제:
  *   hardBody == 0            → 전량승격 (구 SOFT_DOC_HARD_MAX=0 경로)
@@ -286,7 +476,23 @@ const SOFT_UP_FLOOR = 8.5;
 const TABLE_CAP_RE  = new RegExp(String.raw`^(?:Table|TABLE)\s*\.?\s*(${NUM_CLASS})\s*([.:|]|$)`);
 const TABLE_CAP_RE2 = new RegExp(String.raw`^(?:Table|TABLE)\.?(${NUM_CLASS})([.:|]|$)`);
 const TABLE_GAP_PT = 15;         // 롤백 run 연결 임계 (블록 분리 4.8pt < T < 상단 슬리버 40pt; gate 표적 창 교집합)
-const TABLE_CAP_BLOCK_MAX = 60;  // 이보다 높은 블록의 table 캡션은 figure와 병합된 것으로 보고 미발동(Aegaeon 8@p8 방어)
+/* 캡션 블록 → 표 본체 첫 갭 전용 문턱 (v2.24.1). 조판상 캡션↔표 간격이 표 내부 행 간격보다
+ * 넓어 15pt로는 첫 갭에서 즉시 abort한다 — 실측 첫 갭 9.1·17.3·17.3pt ↔ 종결 갭 24.5·30.0·35.5pt. */
+const TABLE_CAP_GAP_PT = 20;
+/* table 캡션이 든 블록이 **figure와 융합**돼 있으면 경계로 쓰지 않는다 (Aegaeon 8@p8 — 롤백하면
+ * figure가 잘린다). v2.10.0은 이걸 **블록 높이 ≤ 60pt**라는 프록시로 쟀는데, 프록시라서 융합 상대가
+ * **표 자신**일 때도 똑같이 막혔다(Varghese 4@7: 표+표캡션이 159.5pt·텍스트 56줄 한 덩어리 → 표가
+ * figure 영역에 통째로 남고 `other_fig_merged`). v2.24.0에서 취지를 직접 재는 축 = **그림 잉크**로
+ * 교체했다. 그림이 없으면 그 덩어리는 표이므로 막을 이유가 없다.
+ * 실측: Varghese 표 덩어리 graphic 0.0375 ↔ Aegaeon 8@p8 융합 덩어리 0.201·0.365(같은 페이지 figure
+ * 덩어리 0.323) — 5.4배 빈 구간의 아래쪽에 문턱을 둔다.
+ * ★ **높이 조건은 남기지 않았다** — 전수 실측에서 v2.10.0 규칙이 실제 발동한 블록 15건의 graphic이
+ *   **전부 정확히 0**(높이 5~18.6pt·텍스트 1~2줄)이라, 높이가 통과시키던 블록은 그림 잉크 조건도
+ *   빠짐없이 통과한다. 즉 OR로 남겨도 일하는 교집합("≤60pt인데 graphic>0.10")이 코퍼스에 공집합이다.
+ * ★ 마스크가 없으면(= 페이지에 잉크가 전혀 없음) 발동하지 않는다 — 회수된 캔버스는 잉크가 0으로
+ *   읽혀 이 면제가 전건 발동할 수 있기 때문이다(v2.20.0 잉크 하한과 같은 취지). 그런 페이지엔
+ *   애초에 figure가 없으므로 손실이 없다. */
+const TABLE_FUSED_GRAPHIC_MAX = 0.10;
 const SAME_BASELINE_PT = 24;     // 나란한 컬럼 형제 판정 — 캡션 라인 baseline 차(v2.10.1). stacked(Δ≥100) 배제
 const SIBLING_COL_MARGIN = 12;   // 자기 캡션 가장자리 밖으로 그래픽이 살짝 넓을 여지 (v2.10.1·v2.10.2 공용)
 const HUGE_COVERAGE_MIN = 0.54;  // hugePenalty 면제 커버리지 임계 (v2.13.0) — 잉크 90% 질량 폭이 영역 폭의
@@ -450,6 +656,24 @@ function isTableCaption(line) {
  * isCaption과 상호배타적: 구분자가 있으면 SOFT_BODY_RE의 공백 요구에서 탈락한다.
  * isCaption의 길이 가드(12/14자)는 soft 경로에 적용하지 않는다 — 그 자리를
  * SOFT_BODY_RE(본문 대문자 시작)와 SOFT_SPACED_RE(자간 분리 한정)가 대신한다. */
+/* 패널형 본문 판정 (v2.22.0) — SOFT_BODY_RE가 거부한 rest에 대해서만 묻는다. 위 상수 주석 참고.
+ * 반환은 boolean이 아니라 사유 문자열이라 debug 로그에서 어느 증거로 통과했는지 보인다. */
+function softPanelBody(rest) {
+  const m = SOFT_PANEL_LEAD_RE.exec(rest);
+  if (!m) return null;
+  const tail = rest.slice(m[0].length);
+  if (SOFT_PANEL_COMMA_RE.test(tail)) return "panel-comma";
+  /* ② 열거 — 범위형("a–c")이면 마지막 문자 기준으로 다음을 본다. 'z'에서 넘치는 경우는
+   *    다음 문자가 라틴 소문자가 아니므로 증거로 삼지 않는다(정규식 조립 안전성도 겸한다). */
+  const last = m[2] || m[1];
+  if (last >= "z") return null;
+  const next = String.fromCharCode(last.charCodeAt(0) + 1);
+  const hit = new RegExp(String.raw`[,;.]\s*` + next + String.raw`\b`).exec(tail);
+  if (!hit) return null;
+  /* 첫 패널과 그 구분자 사이가 실제 본문(어절 ≥2)이어야 한다 — "a, b show …"는 이 구간이 비어 있다. */
+  return /\S\s+\S/.test(tail.slice(0, hit.index)) ? "panel-enum" : null;
+}
+
 function softCaptionOf(line) {
   /* v2.19.2: hard 경로(isCaption)와 **같은 접두 처리**를 여기에도 적용한다. soft는 matchCaption을
    * 거치지 않고 자기 정규식을 raw line에 직접 들이대므로, isCaption만 고치면 Springer "◂Fig. 5 …"
@@ -458,6 +682,12 @@ function softCaptionOf(line) {
   let m = SOFT_CAP_RE.exec(text);
   if (m && SOFT_BODY_RE.test(m[3]))
     return { num: m[2].toUpperCase(), form: m[1].toLowerCase() };
+  /* 패널형 (v2.22.0) — SOFT_BODY_RE가 거부한 뒤에만 묻는다. 두 갈래는 상호배타적이라
+   * 기존 통과분의 판정·form은 전부 불변이고, 여기서 늘어나는 것은 후보뿐이다. */
+  if (m) {
+    const via = softPanelBody(m[3]);
+    if (via) return { num: m[2].toUpperCase(), form: m[1].toLowerCase(), via };
+  }
   if (!SOFT_SPACED_RE.test(text)) return null;
   m = SOFT_CAP_RE2.exec(text.replace(/\s+/g, ""));
   if (m && SOFT_BODY_RE2.test(m[3]))
@@ -465,7 +695,9 @@ function softCaptionOf(line) {
   return null;
 }
 
-const HARD_STITCH_NUM_RE = new RegExp(String.raw`^(${NUM_CLASS})\s*([.:|])(?!\d)(?:\s*.*)?$`);   // 문자접두 대문자 (case-sensitive, 위 ★)
+/* 문자접두 대문자 (case-sensitive, 위 ★). ⚠ v2.22.0에서 패널 옵션 그룹을 넣었다가 CAP_RE와 함께
+ * 되돌렸다 — 같은 오탐 계열("3 c. 1990"·"2 p. 34"·"12 b: see above")이 그대로 생긴다. */
+const HARD_STITCH_NUM_RE = new RegExp(String.raw`^(${NUM_CLASS})\s*([.:|])(?!\d)(?:\s*.*)?$`);
 const STITCH_GAP_PT = 18;
 
 /* slots(라인 순서)를 걷되 각 라인 뒤에 그 라인에서 분해된 임베디드 앵커를 이어 붙인다.
@@ -653,7 +885,9 @@ function captionAnchors(lines, dbg) {
     const line = lines[i];
     if (ownerByPart.has(line)) continue;          // 이미 hard 앵커이거나 그 조각
     const soft = softCaptionOf(line);
-    if (soft) softSlots.push({ index: i, line, num: soft.num, form: soft.form });
+    /* via = 후보가 어느 갈래로 생겼는지(기존 본문규칙 = null, v2.22.0 패널형 = "panel-comma"/"panel-enum").
+     * 진단·debug 표기 전용이다 — 게이트 입력으로 읽지 않는다(v2.19.5 §진단 독립성). */
+    if (soft) softSlots.push({ index: i, line, num: soft.num, form: soft.form, via: soft.via || null });
   }
   /* slots(희소 배열)를 노출하는 이유: 승격 시 slots[index] 기입 후 filter(Boolean) 재실행만으로
    * 라인 순서가 보존된다 — anchors 순서는 detectPage의 밴드 한계·otherCaps가 소비하므로 결정적이어야 한다. */
@@ -798,7 +1032,7 @@ function promoteSoftAnchors(pageData, dbg, diag) {
         });
       }
       dbg(`[doc] SOFT ${provisional ? "provisional" : "promote"} p${pd.num} num=${c.num} form=${c.form}` +
-          ` s=${JSON.stringify(c.line.s.slice(0, 50))}`);
+          `${c.via ? ` via=${c.via}` : ""} s=${JSON.stringify(c.line.s.slice(0, 50))}`);
     }
     if (promoted) cd.anchors = assembleAnchors(cd.slots, cd.embedded);   // 라인 순서 보존 재구성
   }
@@ -1242,6 +1476,217 @@ function makeDiagnosticRecorder(callback) {
 /* 방향별 후보가 공유하는 순수 채점기. 후보 생성기(up/down, Phase 2: left/right)는
    평범한 수치 지표만 이 함수에 넘기고, 선택기는 동일 점수축으로 비교한다. */
 const clamp01 = v => Math.max(0, Math.min(1, v));
+/* 본문 컬럼 추정 (작업 중: 컬럼 인식 블록 분할) — dom 폰트 줄의 x 점유 히스토그램에서
+ * 거의 비어 있는 구간(거터)을 찾아 컬럼 구간을 돌려준다.
+ * ★ **캡션 폭을 쓰면 안 된다**는 것이 이 함수의 존재 이유다: 캡션이 라벨만 있는 조판에서는
+ *   42pt까지 좁아지고(Wiley "F I G U R E 5" / 밴드 489pt = 0.09) 그 조각으로 페이지를 쪼개면
+ *   분할이 무의미해진다(전수 실측 402행/112편이 프로파일<밴드 절반).
+ * 컬럼이 1개면 null — 분할할 이유가 없고 밴드가 곧 컬럼이다. dom 줄이 희소한 페이지(그림
+ * 위주 페이지가 정확히 그렇다)도 null로 떨어져 종전 동작을 유지한다. */
+/* ===================== 본문 단락 기하 객체 (v2.25.0) =====================
+ * 본문 판별 단위를 **줄**에서 **단락**으로 올린다. 지금 `stopper`는 줄 하나를 보고 "위아래
+ * 이웃이 있나"만 묻고, 블록에는 x가 없어 *"이 본문이 내 영역을 가로막나, 옆 컬럼에 비켜
+ * 있나"*를 물을 수단이 없다. 단락은 자기 x 경계를 가지므로 그 질문에 답한다.
+ *
+ * ★ 사슬의 정체성은 **좌단이 아니라 우단**이다. `buildLines`가 8pt x-갭에서 한 시각적 줄을
+ *   조각으로 쪼개므로(캡션↔옆 컬럼 병합 방지 — 손대면 안 된다) 인라인 수식으로 시작하는
+ *   본문 줄은 좌단이 여백이 아니다(Kane-1998 p2 `B_ac` 뒤 본문 조각 x=54.9 ↔ 여백 40.0:
+ *   좌단 ±2pt를 요구하면 이 한 줄이 18줄 사슬을 가른다). 반대로 우단은 조판기가 폭에 맞춰
+ *   정렬한 값이라 정확하고, 그 정렬 자체가 "폭에 맞춰 흘렸다 = 산문"의 증거다.
+ *   → 꽉 찬 줄은 **우단 일치**, 마지막 줄은 **좌단 일치 + 짧음**. 좌단은 [여백, 여백+들여쓰기]
+ *     범위만 허용해 옆 컬럼(우단이 아예 다름)과 표 셀(우단 제각각)을 배제한다.
+ * ★ "다음 줄"을 페이지 baseline 순서로 찾으면 안 된다 — 다단은 좌우 컬럼이 1pt 간격으로
+ *   교대해(Aegaeon p12 좌 x=54 ↔ 우 x=318) 사슬이 매 줄 끊긴다. 좌·우단 조건이 그 필터다.
+ *   결과적으로 사슬은 정의상 한 컬럼 안에 있다 = **단락 자체가 컬럼의 증거**다.
+ * ★ 크기 하한(줄·글자·폭)은 **판별축이 아니라 무료 가드**다. 전수 실측에서 과절단을 일으킨
+ *   단락은 오히려 더 컸고(중앙값 9줄·599자 ↔ 정상 개선 7줄·440자), 하한을 올리면 3줄짜리
+ *   정상 개선(Carolyn `1@1` critical 포함)이 먼저 죽는다. 관측 최소값 아래에 둔다. */
+const PARA_LEFT_TOL   = 2;     // 좌단 허용오차(pt)
+const PARA_RIGHT_TOL  = 3;     // 우단 일치 허용오차(pt) — 이보다 짧으면 '마지막 줄'
+const PARA_INDENT_MAX = 24;    // 첫 줄 들여쓰기·선두 수식 조각 허용 폭
+const PARA_GAP_MIN    = 0.85;  // 줄간격 하한 (h 배수) — neighborsOf와 같은 창
+const PARA_GAP_MAX    = 1.95;
+const PARA_GAP_CONS   = 0.25;  // 줄간격 일정성 (h 배수)
+const PARA_MIN_LINES  = 3;     // ↓ 셋 다 관측 최소값 아래의 무료 가드
+const PARA_MIN_CHARS  = 100;
+const PARA_MIN_W_PT   = 60;
+/* "가로막는다"의 정의 — 단락이 **캡션 컬럼 폭**을 이만큼 덮어야 경계가 된다. 분모가 밴드 폭이면
+ * 이미 가로로 과포함된 상자가 기준이 되어 옆 컬럼 본문이 blocker가 된다(Harley `2@3` 실측:
+ * 옆 컬럼 단락이 전폭 밴드의 0.47을 덮어 그림 상단 100.9pt를 깎았다). 잠정값이며 전수 재교정 대상. */
+const PARA_BLOCK_COV   = 0.5;
+const PARA_COL_MIN_OX  = 0.5;  // 컬럼이 밴드와 이만큼 안 겹치면(=side 배치) 미발동 → 종전 동작
+const PARA_MIN_KEEP_PT = 8;    // 단락 아래로 이만큼도 안 남으면 조각을 만들지 않고 통째로 stop
+const PARA_MAX_GRAPHIC = 0.05;
+const PARA_COL_MERGE   = 0.6;  // 단락 x구간이 이만큼 겹치면 같은 컬럼으로 묶는다
+/* x 클램프 (v2.26.0) — 세로 초과는 v2.25.0이 잡았지만 실측 잔여의 대부분은 **가로**였다:
+ * 2단 조판에서 figure는 한 컬럼인데 상자가 옆 컬럼까지 문다(Pylkkänen `1@2` 좌 219pt ·
+ * science-1247125 `2@4` 우 193pt · rsc c9ta00701f `2@3` 우 182pt — 전부 위쪽 초과는 0~12pt).
+ * ★ **순서가 설계의 일부다**: y를 먼저 확정하고 그 y로 x를 잰다. 세로 과포함된 y범위로 x를
+ *   재면 같은 컬럼 본문까지 blocker가 되어 이미 정답인 x가 부서진다(Kane `3@3`: 정답
+ *   x301–558 → x554–558). 순서를 바로잡으면 전수 모의가 침범 22행/깨끗한 3/앵커 2 →
+ *   **침범 3행/깨끗한 0/앵커 0**으로 바뀐다(축소 97행 중 확실 개선 94). */
+const PARA_X_YFRAC     = 0.5;  // 단락이 영역 y범위와 이만큼 겹쳐야 x 판정에 참여
+const PARA_X_MIN_KEEP  = 60;   // 남는 조각이 이보다 좁으면 만들지 않는다 (pt)
+/* **남기는 폭의 하한 비율** — 이름이 "축소 상한"이면 25%만 자른다고 읽히지만 실제 의미는
+ * "원 폭의 25% 이상은 남긴다" = 최대 75% 절단 허용이다(적대 리뷰 #6 지적으로 개명).
+ * peel의 "한 블록만 벗긴다"보다 훨씬 느슨하며, 관측 상자 폭(~1200px)에서는 PARA_X_MIN_KEEP
+ * (132px)보다 이쪽(300px)이 실제로 작동하는 바닥이다. */
+const PARA_X_MIN_KEEP_FRAC = 0.25;
+/* blocker 묶음이 상자 높이의 이만큼은 덮어야 x를 자른다 (적대 리뷰 #4). 없으면 상자 높이의
+ * 10%만 차지하는 단락이 자기 x구간을 전 높이에 걸쳐 지운다. */
+const PARA_X_MIN_YCOV = 0.5;
+/* 이만큼도 안 줄면 발동하지 않는다 — "변화 없음" 가드.
+ * ★ 한때 12px이었다(v2.26.0). 방출 여백(10px ≈ 4.55pt)만 깎는 발화 54행을 막으려던 값인데,
+ *   전수 확인 결과 그 54행 중 **51행이 `body_text_sliver` 보유**였다 — 여백이 옆 컬럼 본문과
+ *   겹쳐 글자 조각이 들어와 있었고, 걷어내는 쪽이 정답이다. 막을 근거로 들었던 두 위험도 약했다:
+ *   최소 크기 바닥은 산술상 **도달 불가**이고(조각이 항상 PARA_X_MIN_KEEP 이상), claim 기하는
+ *   **미관측**인 데다 `clampedFromX_`로 이미 고쳐져 있었다. 남은 근거는 전수 diff 잡음뿐이었다.
+ * ★ 이 대역은 자동 승계 문턱(5pt) 아래라 **사람 눈에 구조적으로 안 닿는다** — 확인하려면
+ *   `carry-forward --bbox-tol`로 문턱을 낮춰 재판정 큐로 올려야 한다(EVAL 결정 로그 2026-08-01). */
+const PARA_X_MIN_DELTA = 2;
+function bodyParagraphs(lines, dom) {
+  const L = lines.filter(u => u.font === dom && u.w > 0)
+    .map(u => ({ u, bl: u.top + u.h, x: u.left, r: u.left + u.w, h: u.h }))
+    .sort((a, b) => a.bl - b.bl || a.x - b.x);
+  let maxH = 0;
+  for (const e of L) if (e.h > maxH) maxH = e.h;
+  const used = new Uint8Array(L.length);
+  const out = [];
+  for (let i = 0; i < L.length; i++) {
+    if (used[i]) continue;
+    used[i] = 1;
+    const seed = L[i], chR = seed.r, ch = [seed];
+    /* ★ 여백(chLeft)은 seed가 아니라 **본문 줄**이 정한다. 조판 관습상 단락의 첫 줄은 들여쓰기
+     * 되어 있어(`\parindent`) seed를 여백으로 박으면 그 다음 줄이 전부 `x < chLeft`로 거부되고
+     * 3줄짜리 들여쓴 단락은 아예 검출되지 않는다(적대 리뷰 F5 실측). 두 번째 줄에 한해 왼쪽으로
+     * 들여쓰기 폭만큼 이동을 허용하고 거기서 여백을 재확정한다. */
+    let chLeft = seed.x, gap = null;
+    for (;;) {
+      const cur = ch[ch.length - 1];
+      const slack = ch.length === 1 ? PARA_INDENT_MAX : PARA_LEFT_TOL;
+      let best = -1, bestD = Infinity, bestShort = false;
+      for (let j = 0; j < L.length; j++) {
+        if (used[j]) continue;
+        const v = L[j], d = v.bl - cur.bl;
+        if (d <= 0) continue;
+        /* L은 baseline 오름차순이라 창을 넘어가면 뒤는 전부 넘어간다 (적대 리뷰 F8: 조기 종료가
+         * 없으면 페이지당 Θ(n²)로 2000줄에서 25~50ms를 쓴다). maxH를 써야 보수적으로 안전하다. */
+        if (d > PARA_GAP_MAX * Math.max(cur.h, maxH)) break;
+        const hh = Math.max(cur.h, v.h);
+        if (d < PARA_GAP_MIN * hh || d > PARA_GAP_MAX * hh) continue;
+        if (gap !== null && Math.abs(d - gap) > PARA_GAP_CONS * hh) continue;
+        if (v.x < chLeft - slack || v.x > chLeft + PARA_INDENT_MAX) continue;
+        const rightOk = Math.abs(v.r - chR) <= PARA_RIGHT_TOL;
+        const shortOk = v.r < chR - PARA_RIGHT_TOL && v.x >= chLeft - slack &&
+          v.x <= chLeft + PARA_LEFT_TOL;
+        if (!rightOk && !shortOk) continue;
+        if (d < bestD) { bestD = d; best = j; bestShort = shortOk; }
+      }
+      if (best < 0) break;
+      if (gap === null) gap = bestD;
+      if (ch.length === 1) chLeft = Math.min(chLeft, L[best].x);   // 여백 재확정
+      used[best] = 1; ch.push(L[best]);
+      if (bestShort) break;                 // 짧은 줄 = 단락의 끝
+    }
+    if (ch.length < PARA_MIN_LINES) continue;
+    let chars = 0;
+    for (const e of ch) chars += typeof e.u.s === "string" ? e.u.s.length : 0;
+    if (chars < PARA_MIN_CHARS) continue;
+    let x0 = Infinity, x1 = -Infinity;
+    for (const e of ch) { if (e.x < x0) x0 = e.x; if (e.r > x1) x1 = e.r; }
+    if (x1 - x0 < PARA_MIN_W_PT) continue;
+    const last = ch[ch.length - 1];
+    const box = { x0, y0: ch[0].u.top, x1, y1: last.u.top + last.u.h };
+    /* 고정폭(코드·의사코드 리스팅)은 들여쓰기 계단이라 대개 사슬이 안 되지만, 이중으로 건다.
+     * v2.20.0에서 글꼴 이름이 아니라 실측 폭으로 판정하도록 교정된 그 함수를 그대로 쓴다. */
+    if (monoWidthStats(ch.map(e => e.u), box).mono) continue;
+    out.push({ ...box, n: ch.length, chars });
+  }
+  return out.sort((a, b) => a.y0 - b.y0);
+}
+/* 캡션이 속한 **본문 컬럼**을 단락으로 추정한다. 캡션 상자 폭을 쓰면 안 된다 — 라벨만 있는
+ * 조판에서 42pt까지 좁아지고(Wiley `F I G U R E 5`) 그건 v2.23.0 라운드에서 전수 ΔIoU
+ * −15.28로 태운 실패다. 컬럼을 알려주는 것은 단락이지 캡션이 아니다.
+ * 자기 캡션과 겹치는 단락은 뺀다 — side 캡션은 패널 설명 `(A)…(B)…`이 각각 단락으로 잡혀
+ * figure 한복판을 자기 컬럼으로 착각하게 만든다(Goychuk `2@5` 실측). */
+/* ★ v2.26.0: "캡션 중심을 품는 단락"에서 **"캡션 상자와 겹침이 최대인 단락 컬럼"**으로 완화.
+ * 종전 판정은 **전폭 캡션에서 통째로 실패**했다 — 캡션이 두 컬럼에 걸치면 중심이 거터에
+ * 떨어져 어떤 단락도 품지 못하고 `paraCol`이 null이 되어 규칙 전체가 미발동한다. 실측:
+ * Raby-2007 `1@1`(캡션 x42–560, 중심 301 ↔ 컬럼 x41.8–293.9 / x307.8–559.9 — 어디에도 없음.
+ * 위쪽 과포함 502pt가 그래서 방치됐다) · Pylkkänen `1@2` · abg9302 `2@4` · science-1247125 `2@4`.
+ * 단락을 x구간으로 군집해 컬럼을 만들고 캡션과 가장 많이 겹치는 것을 고른다. */
+function paragraphColumn(paras, capbox, capTop, capBottom) {
+  /* 자기 캡션과 겹치는 단락은 뺀다 — side 캡션은 패널 설명 `(A)…(B)…`이 각각 단락으로 잡혀
+   * figure 한복판을 자기 컬럼으로 착각하게 만든다(Goychuk `2@5` 실측). */
+  const cands = paras.filter(p => !(p.y0 < capBottom && p.y1 > capTop));
+  if (!cands.length) return null;
+  /* ★ 병합 기준은 **넓은 쪽** 대비다. 좁은 쪽 대비로 재면 전폭 단락 하나가 모든 단일 컬럼
+   * 단락을 차례로 흡수해(포함은 항상 좁은 쪽의 100%다) 페이지의 컬럼이 하나로 붕괴한다.
+   * 그러면 `colW`가 페이지 폭이 되어 `PARA_BLOCK_COV * colW`가 단일 컬럼 폭을 넘고
+   * **그 페이지의 모든 앵커에서 상단 클램프가 통째로 잠긴다**(적대 리뷰 #3 — 전폭 초록·
+   * "Significance" 절·다른 figure의 전폭 캡션이 있는 2단 페이지가 전부 해당). */
+  const cols = [];
+  for (const p of cands.slice().sort((a, b) => a.x0 - b.x0)) {
+    const c = cols[cols.length - 1];
+    const share = c ? Math.min(c[1], p.x1) - Math.max(c[0], p.x0) : 0;
+    if (c && share > PARA_COL_MERGE * Math.max(c[1] - c[0], p.x1 - p.x0)) {
+      c[0] = Math.min(c[0], p.x0); c[1] = Math.max(c[1], p.x1);
+    } else cols.push([p.x0, p.x1]);
+  }
+  /* 겹침이 같으면 **좁은 컬럼**을 고른다 — 전폭 단락이 만든 spanning 군집과 진짜 컬럼이
+   * 캡션과 같은 폭으로 겹치는 경우가 실재하고(Blasi p4 245 대 245), 그때 답은 진짜 컬럼이다. */
+  let best = null, bestOx = 0;
+  for (const c of cols) {
+    const o = Math.min(c[1], capbox.left + capbox.w) - Math.max(c[0], capbox.left);
+    if (o <= 0) continue;
+    if (!best || o > bestOx + 0.5 ||
+        (Math.abs(o - bestOx) <= 0.5 && c[1] - c[0] < best[1] - best[0])) {
+      bestOx = Math.max(bestOx, o); best = c;
+    }
+  }
+  return best;
+}
+
+const COL_MIN_LINES  = 8;      // 근거로 삼을 최소 dom 줄 수
+const COL_GUTTER_MAX = 0.06;   // 점유 최대치의 이 비율 이하면 거터
+const COL_MIN_W_PT   = 60;     // 이보다 좁은 구간은 컬럼으로 보지 않는다
+function bodyColumns(lines, dom, pageW) {
+  const n = Math.max(1, Math.ceil(pageW));
+  const occ = new Int32Array(n);
+  let nl = 0;
+  for (const u of lines) {
+    if (u.font !== dom || !(u.w > 0)) continue;
+    nl++;
+    const a = Math.max(0, Math.floor(u.left)), b = Math.min(n, Math.ceil(u.left + u.w));
+    for (let x = a; x < b; x++) occ[x]++;
+  }
+  if (nl < COL_MIN_LINES) return null;
+  let peak = 0;
+  for (let x = 0; x < n; x++) if (occ[x] > peak) peak = occ[x];
+  if (peak < COL_MIN_LINES) return null;
+  const thr = peak * COL_GUTTER_MAX;
+  const cols = [];
+  let s = -1;
+  for (let x = 0; x <= n; x++) {
+    const filled = x < n && occ[x] > thr;
+    if (filled && s < 0) s = x;
+    else if (!filled && s >= 0) { if (x - s >= COL_MIN_W_PT) cols.push([s, x]); s = -1; }
+  }
+  return cols.length >= 2 ? cols : null;
+}
+/* 블록 분할용 x범위 — 캡션 중심이 속한 **본문 컬럼**을 밴드로 클램프해 돌려준다.
+ * 컬럼을 못 구하거나(단컬럼·희소 페이지) 교집합이 좁으면 밴드 전폭 = 종전 동작. */
+const PROF_MIN_W_PT = 150;
+const PROF_MIN_W_RATIO = 0.4;
+function profRange(bx0, bx1, capbox, cols) {
+  if (!cols) return [bx0, bx1];
+  const c = capbox.left + capbox.w / 2;
+  const col = cols.find(([a, b]) => c >= a && c <= b);
+  if (!col) return [bx0, bx1];
+  const a = Math.max(bx0, col[0]), b = Math.min(bx1, col[1]);
+  const need = Math.max(PROF_MIN_W_PT, PROF_MIN_W_RATIO * (bx1 - bx0));
+  return (b - a >= need) ? [a, b] : [bx0, bx1];
+}
 function figureScore(m) {
   const area = 3.0 * clamp01(m.areaRatio / 0.08);
   const width = 2.0 * clamp01(m.widthRatio / 0.35);
@@ -1302,6 +1747,12 @@ function chooseCandidate(up, alternatives, policy) {
 /* ===================== 페이지 단위 감지 (핵심) ===================== */
 function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
   const figs = [];
+  /* 본문 컬럼 (작업 중: 컬럼 인식 블록 분할) — 페이지당 1회. null이면 종전 동작. */
+  const bodyCols = bodyColumns(lines, dom, pg.w);
+  /* 본문 단락 객체 (v2.25.0) — 페이지당 1회. 비면 종전 동작. */
+  /* 페이지 단락 — 방출 지점(x 클램프)도 같은 배열을 써야 하므로 pg에 남긴다. detectPage가
+   * 재실행돼도 입력이 같으면 결과가 같으므로 캐시로 재사용한다. */
+  const bodyParas = pg.bodyParas_ || (pg.bodyParas_ = bodyParagraphs(lines, dom));
   const { anchors: caps, ownerByPart, infoByAnchor } = captionData;
   if (diag) diag.add("detection-pass", {
     page: pg.num, pass, decision: "started", anchorCount: caps.length,
@@ -1322,6 +1773,9 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
   dbg(`[p${pg.num}] lines=${lines.length} imgs=${pg.images.length} caps=${caps.map(c=>JSON.stringify(c.s.slice(0,30))).join(" ")}`);
   if (subPanel.size)
     dbg(`  subpanel=${subPanel.size} ${[...subPanel].slice(0, 4).map(u => JSON.stringify(u.s.slice(0, 22))).join(" ")}`);
+  if (bodyParas.length)
+    dbg(`  paras=${bodyParas.length} ${bodyParas.slice(0, 3).map(p =>
+      `[x${p.x0.toFixed(0)}-${p.x1.toFixed(0)} y${p.y0.toFixed(0)}-${p.y1.toFixed(0)} n${p.n}]`).join(" ")}`);
   if (tableStop.size)
     dbg(`  tables=${tableStop.size} ${[...tableStop].slice(0, 4).map(u => JSON.stringify(u.s.slice(0, 22))).join(" ")}`);
   for (const cap of caps) {
@@ -1367,6 +1821,19 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
     }
     const capbox = { left: colL, w: colR - colL, top: cap.top };
     const captionBox = { x0: colL, y0: cap.top, x1: colR, y1: capBottom }; // pt, 좌상단 원점
+    /* 이 앵커의 본문 컬럼 (v2.25.0) — 단락 stop의 x 기준. null이면 그 규칙은 미발동. */
+    /* ★ 컬럼 선택은 **캡션 앵커 줄**로 한다 — 흡수 확장된 캡션 블록(`capbox`)이 아니다.
+     * `capbox`는 지면 장식을 빨아들여 오염된다: Blasi-2016 p4는 캡션이 `x38–283`(왼쪽 컬럼)인데
+     * 블록이 `x13–542`(전폭)로 커졌다 — PNAS 다운로드 스탬프(`x13–362`, 갭 −1.4pt)와 푸터
+     * (`x354–542`, 갭 11.4pt < 창 11.6pt)가 비-dom 폰트라 1.7h 창에 들어왔기 때문이다. 그 상태로
+     * 컬럼을 고르면 좌우 겹침이 245pt 대 245pt 동률이 되어 **틀린 컬럼**이 뽑힌다(실측: 왼쪽 컬럼
+     * figure를 오른쪽 컬럼 단락으로 클램프 → 과포함 90pt가 clip 50pt로 뒤집힘).
+     * 전수 16행/752(2.1%)이 블록이 캡션 줄보다 **왼쪽으로** 뻗은 오염 상태다.
+     * ★ 캡션 **폭**을 쓰는 것과 다르다 — 여기서 쓰는 것은 **위치**다. 라벨만 있는 좁은 캡션
+     *   (Wiley `F I G U R E 5` 42pt)도 자기 컬럼과만 겹치므로 최대 겹침 판정은 정상 동작한다.
+     *   v2.23.0이 태운 실패는 캡션 폭을 **프로파일 밴드**로 쓴 것이고 그것과는 다른 사용이다. */
+    const paraCol = paragraphColumn(bodyParas, { left: cap.left, w: cap.w }, cap.top, capBottom);
+    dbg(`  Fig${num}: PARA-COL ${paraCol ? `x[${paraCol[0].toFixed(0)},${paraCol[1].toFixed(0)}]` : "none"}`);
     /* 12-B N−1 방출이 caption page 좌표계의 캡션 텍스트·박스를 그대로 재사용하도록 보존한다.
      * public output에는 나가지 않는 내부 필드다 (v2.19.0). */
     capInfo.captionTextObserved_ = capText;
@@ -1480,16 +1947,43 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
       const it = im.top * S, ib = (im.top + im.h) * S;
       return Math.min(ib, b1) - Math.max(it, b0) > 0.5 * (ib - it);
     });
-    const scan = (bx0, bx1) => {
+    /* 단락이 **그림 안에 얹혀 있나** (v2.25.0) — 그림 안의 진짜 산문(프롬프트 박스)을 본문으로
+     * 오인하지 않기 위한 바깥 맥락 신호. `hasImage`와 방향이 반대다: 저쪽은 "이 y구간이 이미지를
+     * 대부분 담나"고 여기는 "이 단락이 이미지 안에 대부분 들어가나"다.
+     * ★ **스캔 PDF는 이 규칙의 대상이 아니다**(의도된 보류). 스캔본은 페이지 전체가 래스터 한
+     *   장이라 모든 본문 단락이 여기서 면제되고 규칙이 무발동한다 = 종전 동작. 페이지 크기
+     *   래스터를 예외 처리하면 스캔본이 살아나지만, 그건 현대 PDF에 아무 이득이 없으면서
+     *   전면 그림 위 산문의 방어선을 무너뜨린다([사람] 지시 2026-08-01). 실측 무발동:
+     *   Harley-1990 `2@3`·science-245 `4@4` — 둘 다 손해 없이 종전 상자를 유지한다. */
+    const paraOnImage = p => pg.images.some(im => {
+      const oy = Math.min(im.top + im.h, p.y1) - Math.max(im.top, p.y0);
+      const oxx = Math.min(im.left + im.w, p.x1) - Math.max(im.left, p.x0);
+      return oy > 0.6 * (p.y1 - p.y0) && oxx > 0.6 * (p.x1 - p.x0);
+    });
+    /* 단락 상자 안의 **그림 잉크 비율** (백로그 (가) 축) — 래스터 여부와 무관하게, 글자 상자 밖
+     * 잉크가 유의미하면 그 산문은 그림 위에 있다. 마스크가 없으면 판정 불가 → 0(면제 안 함). */
+    const paraGraphic = p => grid.textMask_
+      ? graphicInkRatio(grid, grid.textMask_,
+          { x0: p.x0 * S, y0: p.y0 * S, x1: p.x1 * S, y1: p.y1 * S })
+      : 0;
+    /* 빈 행 판정(=블록 분할) x범위를 **밴드와 분리**한다 (작업 중 — 컬럼 인식 블록 분할).
+     * 종전엔 `prof`를 밴드 폭 전체로 합산했는데, 다단 조판은 좌우 컬럼의 줄 간격이 어긋나 전폭
+     * 빈 행이 거의 생기지 않는다 → 제목·그림·양쪽 본문이 단일 블록 하나가 되고 본문/그림 판정이
+     * 블록 단위 질문이라 답할 수단이 사라진다(Viswanathan-1996 p1 `blk [119-1076]`).
+     * `pfx0/pfx1` 미지정이면 밴드 자신 = 종전과 완전히 동일. 블록 **안에서** 재는 값(테두리·잉크·
+     * blockLines·boxPx)은 계속 밴드 기준이다 — 바뀌는 것은 y를 어디서 자르냐 하나뿐이다. */
+    const scan = (bx0, bx1, pfx0, pfx1) => {
       const rx0 = Math.max(0, Math.round(bx0 * S)), rx1 = Math.min(grid.W, Math.round(bx1 * S));
-      const Wb = Math.max(1, rx1 - rx0);
+      const qx0 = Math.max(rx0, Math.round((pfx0 === undefined ? bx0 : pfx0) * S));
+      const qx1 = Math.min(rx1, Math.round((pfx1 === undefined ? bx1 : pfx1) * S));
+      const Wp = Math.max(1, qx1 - qx0);
       const prof = new Int32Array(rcap);
       for (let y = 0; y < rcap; y++) {
         let c = 0;
-        for (let x = rx0; x < rx1; x++) c += inkAt(grid, x, y);
+        for (let x = qx0; x < qx1; x++) c += inkAt(grid, x, y);
         prof[y] = c;
       }
-      const thr = Math.max(2, Math.floor(0.002 * Wb));
+      const thr = Math.max(2, Math.floor(0.002 * Wp));
       const blank = y => prof[y] <= thr;
       const SEP = Math.round(4.8 * S);
       const blocks = [];
@@ -1505,16 +1999,100 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
         }
         blocks.push([b0, b1]);
       }
+      /* ★ 바깥 경계 복원 — 컬럼 프로파일은 **어디서 자를지**만 정하고, 각 블록의 실제 y 범위는
+       * **밴드 잉크**가 정한다. 이걸 빼면 캡션 컬럼이 비어 있는 몇 행 때문에 블록 경계가 밀리고,
+       * 그 미세한 차이가 `gapPt`·면적을 흔들어 **방향 선택을 뒤집는다** — PRLett `5@5` 실측:
+       * 블록 하한 401→383px로 gap 1.5→9.7pt, up 10.36→9.18이 되어 left 11.41이 마진 1.5를
+       * 넘어 채택되고 상자가 옆 컬럼으로 통째 이동했다(정답 대비 IoU 1.000→0.028).
+       * 이웃 블록 경계를 넘지 않으므로 분할 자체는 보존된다 — "판정은 더 잘게, 면적은 그대로". */
+      if (qx0 !== rx0 || qx1 !== rx1) {
+        const profB = new Int32Array(rcap);
+        for (let y = 0; y < rcap; y++) {
+          let c = 0;
+          for (let x = rx0; x < rx1; x++) c += inkAt(grid, x, y);
+          profB[y] = c;
+        }
+        const thrB = Math.max(2, Math.floor(0.002 * Math.max(1, rx1 - rx0)));
+        /* ★ 복원의 **상한은 밴드 프로파일 블록**이다. 이 상한이 없으면 최상단 컬럼 블록이 이웃이
+         * 없다는 이유로 밴드 잉크를 따라 무한정 자란다 — 실측 Pohl `1@2`가 x35–466 → x35–565
+         * (페이지 폭 595)로 전폭이 됐다. 복원은 "컬럼 분할이 만든 틈을 밴드 기준으로 되돌리는 것"
+         * 이지 "종전보다 넓히는 것"이 아니므로, 종전(v2.22.0)이 보던 덩어리를 넘지 않아야 한다. */
+        const bandBlocks = [];
+        {
+          let y = rcap - 1;
+          while (y >= 0) {
+            while (y >= 0 && profB[y] <= thrB) y--;
+            if (y < 0) break;
+            const b1 = y; let gap = 0, b0 = y;
+            while (y >= 0) {
+              if (profB[y] <= thrB) { gap++; if (gap >= SEP) break; }
+              else { gap = 0; b0 = y; }
+              y--;
+            }
+            bandBlocks.push([b0, b1]);
+          }
+        }
+        for (let i = 0; i < blocks.length; i++) {
+          const lowLim = i > 0 ? blocks[i - 1][0] : rcap;                 // 아래 이웃의 위쪽 끝
+          const upLim = i + 1 < blocks.length ? blocks[i + 1][1] : -1;    // 위 이웃의 아래쪽 끝
+          let [b0, b1] = blocks[i];
+          const mid = Math.floor((b0 + b1) / 2);
+          const host = bandBlocks.find(([a, b]) => mid >= a && mid <= b) || [b0, b1];
+          const lo = Math.min(lowLim, host[1] + 1);
+          const up = Math.max(upLim, host[0] - 1);
+          while (b1 + 1 < lo && profB[b1 + 1] > thrB) b1++;
+          while (b0 - 1 > up && profB[b0 - 1] > thrB) b0--;
+          blocks[i] = [b0, b1];
+          blocks[i].host_ = host;
+        }
+        /* ★ 자투리 되붙이기 — 컬럼 분할이 만든 **SEP보다 얇은 조각**은 독립 블록이 아니라 잔재다.
+         * 같은 밴드 블록에서 나온 이웃과 다시 합친다. 근거는 분류 규칙들이 "온전한 블록"을 전제로
+         * 교정돼 있다는 것: 헤더 판정은 `bl.length`(텍스트 줄 보유)를 요구하는데, 분할이 헤더의
+         * 글자 줄과 잉크 잔재를 갈라 놓으면 잔재 쪽이 어느 분류에도 안 걸려 figure로 포함된다 —
+         * 실측 Pohl `1@2`: 헤더 [52-84]가 [52-72](줄 보유)+[82-84](줄 0)로 갈려 후자가 포함되고
+         * 영역 상단이 11pt 올라간 뒤 가로 확장이 x466→x566(페이지 폭 595)까지 뻗었다. */
+        for (let i = blocks.length - 1; i > 0; i--) {
+          const cur = blocks[i], nxt = blocks[i - 1];       // nxt는 cur보다 아래
+          const thin = (cur[1] - cur[0]) < SEP || (nxt[1] - nxt[0]) < SEP;
+          if (thin && cur.host_ && nxt.host_ && cur.host_ === nxt.host_) {
+            blocks[i - 1] = [Math.min(cur[0], nxt[0]), Math.max(cur[1], nxt[1])];
+            blocks[i - 1].host_ = cur.host_;
+            blocks.splice(i, 1);
+          }
+        }
+      }
       const blockLines = (b0, b1) => lines.filter(u => {
         const c = (u.top + u.h / 2) * S;
         return c >= b0 - 4 && c <= b1 + 4 && ox(u, { left: bx0, w: bx1 - bx0 }) > 0.5 * u.w;
       });
-      const hasBorder = (b0, b1) => {
+      /* table 본체 소급 제외 (v2.10.0, v2.24.1에서 BODY 경로와 공유) — 캡션 블록 하단(capB1)에서
+       * 아래로 작은 갭으로 이어지는 블록 run을 `incl`에서 뺀다. 종결 갭이 없으면(=incl 전부가 run)
+       * 롤백을 취소해 figure 손실을 막는다. 반환값 = 실제로 뺀 블록 수(0이면 abort).
+       * ★ **첫 갭만 따로 연다**(v2.24.1): 조판상 캡션↔표 본체 간격은 표 내부 행 간격보다 넓다 —
+       *   실측 ICLR `2@6`·`B.1@22` 첫 갭 17.3pt vs 내부 10.5~11.8pt, Stout `5@7` 첫 9.1 vs 내부 5.5~10.0.
+       *   종결 갭은 24.5~35.5pt라 (17.3, 24.5) 사이가 비어 있다. 내부 문턱(TABLE_GAP_PT)은 건드리지
+       *   않으므로 기존 TABLE 경로의 run 판정은 불변이고, 바뀌는 것은 첫 갭 하나뿐이다. */
+      const rollbackTableBody = capB1 => {
+        const T = TABLE_GAP_PT * S, T0 = TABLE_CAP_GAP_PT * S;
+        let keep = incl.length, prevTop = capB1;
+        for (let i = incl.length - 1; i >= 0; i--) {
+          const lim = (i === incl.length - 1) ? T0 : T;   // 첫 갭 = 캡션 블록 → 최상단 포함 블록
+          if (incl[i][0] - prevTop >= lim) { keep = i + 1; break; }
+          prevTop = incl[i][1];
+        }
+        const removed = incl.length - keep;
+        if (removed) { farBoundary = incl[keep][1]; incl.length = keep; }
+        return removed;
+      };
+      /* cx0/cx1은 프레임을 찾을 x 구간 (기본 = 밴드). 단락 면제 판정은 **단락 자기 폭**으로
+       * 물어야 한다 — 밴드 극단 잉크 열은 옆 컬럼 본문이나 그래프 축일 수 있어(적대 리뷰 F4)
+       * 프레임 안 산문을 놓치거나 멀쩡한 본문을 프레임으로 오인한다. */
+      const hasBorder = (b0, b1, cx0 = rx0, cx1 = rx1) => {
         const h = b1 - b0 + 1;
         if (h < 18) return false;
         const step = Math.max(1, Math.floor(h / 40));
         const colsInk = [];
-        for (let x = rx0; x < rx1; x++) {
+        for (let x = cx0; x < cx1; x++) {
           let any = 0;
           for (let yy = b0; yy <= b1; yy += step) if (inkAt(grid, x, yy)) { any = 1; break; }
           if (any) colsInk.push(x);
@@ -1536,6 +2114,76 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
       const incl = [];
       let stopReason = "page-edge", stopNstop = 0;
       let farBoundary = 0;
+      /* ---- 블록 단위 관측 (진단 전용 · 판정 미사용) ------------------------------------
+       * 영역의 **가장 바깥 블록**이 남의 텍스트(러닝헤더·섹션 제목·본문)인 경우를 재기 위한
+       * 계측이다. 방출 상자가 사각형이라 바깥 블록만 경계를 바꾸므로 스캔 순서를 함께 남긴다.
+       * 판정 정본(`buildTextInkMask`/`graphicInkRatio`/`monoWidthStats`)을 그대로 재사용하고
+       * `domShare`만 여기서 센다 — 계측이 정본과 다른 양을 재면 그 자체가 오류원이다. */
+      const trace = (diag && grid.textMask_) ? [] : null;
+      /* 행별 잉크 분해 (진단 전용) — `graphic`이 블록 하나당 숫자 1개로 접어 버리는 것을 **어느 행에서
+       * 나왔는지**로 펼친다. 분해 기준은 판정 정본과 같은 마스크(`grid.textMask_`)다:
+       *   txt = 잉크 ∧ 글자상자 안   ·   gfx = 잉크 ∧ 글자상자 밖(= graphicInkRatio의 분자)
+       * 이 배열 하나로 "블록이 왜 안 갈라졌나"와 "그림이 어느 행부터 시작하나"를 동시에 읽는다.
+       * ⚠ txt+gfx는 **밴드 폭**(rx0..rx1) 합이다. 빈 행 판정 입력 `prof[y]`는 컬럼 인식 분할 도입 후
+       *   **캡션 폭**(qx0..qx1) 합이라 둘이 다를 수 있다 — 두 x범위는 `bandStats.bandPt`·`profPt`에
+       *   각각 실려 있고, 같으면(전폭 캡션) 종전처럼 합이 곧 `prof[y]`다.
+       * ★ bin으로 묶는 이유는 산출물 크기다 — 행 단위(px)로 싣으면 논문당 수 MB가 된다. 빈 행은 bin에
+       *   묻히므로 별도로 `innerGaps`에 실제 구간을 그대로 싣는다(그쪽이 4.8pt 문턱과 직접 비교된다). */
+      const PROFILE_BIN_PX = Math.max(1, Math.round(2 * S));
+      /* ★ 행 범위는 `graphicInkRatio`와 **똑같이 배타적**이다(`y0 ≤ y < y1`, 분모 `b1−b0`).
+       * `y <= b1`로 한 행 더 세면 `sum(gfx)/면적`이 `graphic`과 마지막 행만큼 어긋나고, 그 오차가
+       * 1/높이로 스케일해 짧은 블록에서 커진다(코드 리뷰 지적 — 초안이 실제로 그랬다).
+       * `heightPt = (b1−b0)/S`도 같은 배타 정의이므로 이쪽이 전부 일관된다. */
+      const rowProfileOf = (b0, b1) => {
+        const bins = Math.max(1, Math.ceil((b1 - b0) / PROFILE_BIN_PX));
+        const txt = new Array(bins).fill(0), gfx = new Array(bins).fill(0);
+        for (let y = b0; y < b1; y++) {
+          const bi = Math.min(bins - 1, Math.floor((y - b0) / PROFILE_BIN_PX)), row = y * grid.W;
+          for (let x = rx0; x < rx1; x++) {
+            if (!grid.ink[row + x]) continue;
+            if (grid.textMask_[row + x]) txt[bi]++; else gfx[bi]++;
+          }
+        }
+        return { y0Pt: +(b0 / S).toFixed(2), binPt: +(PROFILE_BIN_PX / S).toFixed(4), txt, gfx };
+      };
+      /* 블록 **내부**의 빈 행 구간. 구성상 여기 4.8pt 이상은 있을 수 없다(있었으면 블록이 갈렸다) —
+       * 그래서 이 목록은 "문턱에 얼마나 못 미쳤나"를 보여주는 융합 블록 진단의 정본 수치다.
+       * 긴 것 위주로 상한을 둔다(산출물 크기). */
+      const INNER_GAP_MAX = 12;
+      const innerGapsOf = (b0, b1) => {
+        const gaps = [];
+        let run = 0;
+        for (let y = b0; y <= b1; y++) {
+          if (blank(y)) { run++; continue; }
+          if (run) gaps.push({ yPt: +((y - run) / S).toFixed(2), lenPt: +(run / S).toFixed(2) });
+          run = 0;
+        }
+        if (run) gaps.push({ yPt: +((b1 + 1 - run) / S).toFixed(2), lenPt: +(run / S).toFixed(2) });
+        return gaps.sort((a, b) => b.lenPt - a.lenPt).slice(0, INNER_GAP_MAX);
+      };
+      const note = trace ? (b0, b1, bl, outcome) => {
+        const boxPx = { x0: rx0, y0: b0, x1: rx1, y1: b1 };
+        const boxPt = { x0: bx0, y0: b0 / S, x1: bx1, y1: b1 / S };
+        let domChars = 0, allChars = 0;
+        for (const u of bl) for (const fr of (u.frags || [])) {
+          const n = typeof fr.s === "string" ? fr.s.length : 0;
+          allChars += n; if (fr.font === dom) domChars += n;
+        }
+        const w = monoWidthStats(lines, boxPt);
+        trace.push({
+          outcome,
+          boxPt: { x0: +boxPt.x0.toFixed(1), y0: +boxPt.y0.toFixed(1),
+                   x1: +boxPt.x1.toFixed(1), y1: +boxPt.y1.toFixed(1) },
+          heightPt: +((b1 - b0) / S).toFixed(1),
+          lines: bl.length,
+          nstop: bl.filter(u => stoppers.has(u)).length,
+          graphic: +graphicInkRatio(grid, grid.textMask_, boxPx).toFixed(5),
+          domShare: allChars ? +(domChars / allChars).toFixed(3) : null,
+          chars: w.charCount, mono: w.mono,
+          hasBorder_: hasBorder(b0, b1), hasImage_: hasImage(b0, b1),
+          rowProfile: rowProfileOf(b0, b1), innerGaps: innerGapsOf(b0, b1),
+        });
+      } : null;
       for (const [b0, b1] of blocks) {
         const bl = blockLines(b0, b1);
         const others = otherCaps(bl, cap);
@@ -1547,11 +2195,36 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
           dbg(`    blk [${b0}-${b1}] OTHER-CAP stop`);
           stopReason = "other-cap";
           farBoundary = b1;
+          note?.(b0, b1, bl, "stop:other-cap");
           break;
         }
         if (b1 < 56 * S && (b1 - b0) < 28 * S && bl.length) {
-          dbg(`    blk [${b0}-${b1}] HEADER stop`); stopReason = "header"; farBoundary = b1; break;
+          dbg(`    blk [${b0}-${b1}] HEADER stop`); stopReason = "header"; farBoundary = b1;
+          note?.(b0, b1, bl, "stop:header");
+          break;
         }
+        /* ---- table 캡션 경계 (v2.10.0) 판정 재료. ★ 계산은 BODY stop **앞**에서 하되 STOP 자체는
+         * 여전히 BODY가 먼저다 — 본문 "Table 1. The results ..." 오탐은 stopper로 BODY에서 잡혀야
+         * 한다(v2.10.0 유래). 여기서 앞당기는 이유는 **롤백을 두 경로가 공유**하기 위함이다(v2.24.1).
+         * table 캡션은 자기 table '위'에 있어 up-scan이 캡션에 닿을 땐 본체가 이미 포함된 뒤이므로,
+         * 캡션 아래로 작은 갭으로 이어지는 블록 run(=본체)을 소급 제외한다. 종결 갭 없이 incl 전부를
+         * 먹으면 롤백을 취소해 figure 손실을 막는다(병합 방어 — Blockchain 21@p55이 그 경우다). */
+        const tableCapHere = bl.some(u => tableStop.has(u));
+        /* v2.24.0: 융합 판정을 높이 프록시 → 그림 잉크 실측으로 교체 (위 상수 주석). */
+        const tableBlockOk = tableCapHere && !!grid.textMask_ && graphicInkRatio(grid, grid.textMask_,
+          { x0: rx0, y0: b0, x1: rx1, y1: b1 }) <= TABLE_FUSED_GRAPHIC_MAX;
+        /* ★ v2.24.0: **다른 컬럼의 표는 이 figure의 경계가 아니다.** 표 캡션 줄이 캡션 자신이 속한
+         * 본문 컬럼과 겹칠 때만 경계로 인정한다. 없으면 옆 컬럼 표가 같은 높이라는 이유만으로
+         * figure 상단을 잘라낸다 — ieee tpel `29@11` 실측: 왼쪽 컬럼 `TABLE VII`(x144–182)가
+         * 오른쪽 컬럼 figure(truth x307–546 y62–242)의 위 75pt를 잘랐다. v2.23.0에서 안 그랬던 것은
+         * 그 블록 높이가 60.5pt로 가드를 **간발로** 넘겨서였을 뿐 규칙이 옳아서가 아니다.
+         * 컬럼을 모르면(단컬럼·dom 줄 희소) 종전대로 전부 인정 — 실패 방향이 "표를 못 뺀다"는
+         * 종전 동작이라 이 가드는 좁히는 쪽으로만 작동한다. 밴드 클램프를 쓰지 않는 이유는 밴드가
+         * sparse-text 확장으로 옆 컬럼까지 넓어져 있을 수 있기 때문이다(tpel 밴드 x=[40,326]). */
+        const capCenterX = capbox.left + capbox.w / 2;
+        const capCol = bodyCols && bodyCols.find(([a, c]) => capCenterX >= a && capCenterX <= c);
+        const tableInColumn = !capCol || bl.some(u => tableStop.has(u) &&
+          ox(u, { left: capCol[0], w: capCol[1] - capCol[0] }) > 0.5 * u.w);
         const stopLines = bl.filter(u => stoppers.has(u));
         const nstop = stopLines.length;
         const guard = incl.length ? 1 : 2;
@@ -1561,38 +2234,48 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
         const subpanelPass = nstop >= guard && incl.length === 0 &&
           (cap.top - b1 / S) <= 24 && stopLines.every(u => subPanel.has(u));
         if (nstop >= guard && !subpanelPass && !hasBorder(b0, b1) && !hasImage(b0, b1)) {
-          dbg(`    blk [${b0}-${b1}] BODY stop (nstop=${nstop})`);
-          stopReason = "body"; stopNstop = nstop; farBoundary = b1; break;
+          /* ★ v2.24.1: BODY로 멈추더라도 그 블록이 table 캡션을 품고 있으면 **표 본체 롤백은 돌린다**.
+           * 롤백이 아래 TABLE 분기 안에만 있어서, BODY가 먼저 멈추면 스캔은 캡션에서 서는데 이미
+           * 포함해 버린 표 본체가 그대로 남았다(ICLR `2@6`·`B.1@22`, Stout `5@7` — 전부
+           * `other_fig_merged`). 멈추는 자리는 BODY가 정하고(순서 불변 — 본문 상호참조 오탐은 여전히
+           * BODY가 먼저 잡는다) 롤백만 공유한다. 융합·컬럼 가드는 TABLE 분기와 동일하게 건다. */
+          const rolled = (tableCapHere && incl.length && tableBlockOk && tableInColumn)
+            ? rollbackTableBody(b1) : 0;
+          dbg(`    blk [${b0}-${b1}] BODY stop (nstop=${nstop}` +
+            `${rolled ? `, table rollback ${rolled}` : ""})`);
+          stopReason = "body"; stopNstop = nstop;
+          /* 롤백이 있었으면 far 경계는 헬퍼가 잡은 "제거된 첫 블록의 하단"이다 — b1로 덮으면
+           * farBlankPx가 표 본체 높이만큼 부풀어 farClosed 판정이 뒤집힌다. */
+          if (!rolled) farBoundary = b1;
+          note?.(b0, b1, bl, "stop:body");
+          break;
         }
-        /* table 캡션 경계 (v2.10.0) — ★ BODY stop '뒤'에 둔다. table은 자기 table '위'에 있어, up-scan이
-         * 캡션에 닿을 땐 table 본체가 이미 아래로 포함된 뒤다. 여기서 STOP하고 캡션 아래로 작은 갭
-         * (<TABLE_GAP_PT)으로 이어지는 블록 run(=table 본체)을 소급 제외한다. 종결 갭 없이 incl 전부를
-         * 먹으면 롤백을 취소해 figure 손실을 막는다(병합 케이스 방어). incl 비었을 때(첫 블록)·거대 블록
-         * (figure와 한 덩어리)에서는 미발동 → Aegaeon 8@p8 무회귀. BODY보다 뒤라 본문 "Table 1. The
-         * results ..." 같은 오탐은 stopper로 먼저 BODY stop되어 여기 닿지 않는다(gate 표적 캡션은 nstop=0). */
-        if (incl.length && (b1 - b0) <= TABLE_CAP_BLOCK_MAX * S && bl.some(u => tableStop.has(u))) {
-          const T = TABLE_GAP_PT * S;
-          let keep = incl.length, prevTop = b1;
-          for (let i = incl.length - 1; i >= 0; i--) {
-            if (incl[i][0] - prevTop >= T) { keep = i + 1; break; }
-            prevTop = incl[i][1];
-          }
-          const removed = incl.length - keep;
-          farBoundary = keep < incl.length ? incl[keep][1] : b1;
-          incl.length = keep;
+        if (tableCapHere && incl.length && tableBlockOk && tableInColumn) {
+          const removed = rollbackTableBody(b1);
+          if (!removed) farBoundary = b1;   // abort 시 종전과 동일 (헬퍼는 제거가 있을 때만 갱신)
           dbg(`    blk [${b0}-${b1}] TABLE stop (rollback ${removed}${removed ? "" : " abort"})`);
-          stopReason = "table"; break;
+          stopReason = "table";
+          note?.(b0, b1, bl, "stop:table");
+          break;
         }
         if (subpanelPass) dbg(`    blk [${b0}-${b1}] SUBPANEL pass (nstop=${nstop})`);
         dbg(`    blk [${b0}-${b1}] lines=${bl.length} nstop=${nstop} -> incl`);
         incl.push([b0, b1]);
+        note?.(b0, b1, bl, subpanelPass ? "incl:subpanel-pass" : "incl");
         if (rcap - b0 > 660 * S) { stopReason = "max-span"; farBoundary = b0; break; }
       }
+      /* 스캔 뒤 제거되는 블록을 trace에 표시한다. incl과 trace의 incl 항목은 순서가 같으므로
+       * 바깥쪽(마지막) 것끼리 대응한다 — 이걸 안 남기면 "왜 이 블록이 빠졌는가"를 못 푼다. */
+      const markTrimmed = why => {
+        if (!trace) return;
+        for (let i = trace.length - 1; i >= 0; i--)
+          if (trace[i].outcome.startsWith("incl")) { trace[i].outcome = `trimmed:${why}`; return; }
+      };
       /* 상단 슬리버(가는 선/헤더 잔재) 제거 */
       while (incl.length > 1) {
         const top = incl[incl.length - 1], nxt = incl[incl.length - 2];
         if ((top[1] - top[0]) < 12 * S && (nxt[0] - top[1]) > 40 * S) {
-          farBoundary = Math.max(farBoundary, top[1]); incl.pop();
+          farBoundary = Math.max(farBoundary, top[1]); incl.pop(); markTrimmed("sliver");
         }
         else break;
       }
@@ -1604,21 +2287,167 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
         if (!bl.length) break;
         const joined = bl.map(u => u.s).join(" ");
         if (joined.length <= 45 && /^(\d+(\.\d+)*|[A-Z](\.\d+)+)\s/.test(joined)) {
-          farBoundary = Math.max(farBoundary, tb1); incl.pop();
+          farBoundary = Math.max(farBoundary, tb1); incl.pop(); markTrimmed("section-heading");
         }
         else break;
       }
       const farBlankPx = incl.length
         ? Math.max(0, incl[incl.length - 1][0] - farBoundary - 1) : 0;
-      return { incl, rx0, rx1, stopReason, stopNstop, farBlankPx, unprotectedBodyStops: 0 };
+      /* 단락 면제 (v2.25.0) — 그림 안의 진짜 산문을 본문으로 오인하지 않기 위한 바깥 맥락 신호.
+       * 두 축 다 앵커와 무관하므로 단락 객체에 캐시한다(적대 리뷰 F7 — 앵커 × 최대 3회 scan ×
+       * 단락 수만큼 재계산되면 표적 페이지에서만 비용이 커진다).
+       * ★ **프레임(테두리) 축은 넣지 않는다.** 넣으면 프롬프트 박스형 figure(Feng 부록)를 지킬
+       *   수 있지만 어떤 스코프에서도 일반 본문과 갈리지 않는다는 것이 실측이다(pad별):
+       *     Feng 프롬프트 박스(면제돼야 함)  bd0=0 bd6=0 bd12=1 bd24=1
+       *     Kane 본문 단락(면제되면 안 됨)   bd0=0 bd6=1 bd12=1 bd24=1
+       *   단락 폭 스코프는 Feng을 놓치고, 패딩·밴드 스코프는 Kane을 전건 면제한다. 잉크 축도
+       *   같은 결론이다(Feng g12=0.0045 ↔ Kane g12=0.0033~0.0108로 겹친다). 밴드 스코프가
+       *   두 표적에서만 우연히 맞는데, 그 대가로 **그래프 축 하나가 본문 단락을 통째로 면제**
+       *   시키는 오탐 경로가 열린다(적대 리뷰 F4).
+       *   [사람] 판단(2026-08-01): **프롬프트 박스보다 진짜 그림이 귀중하다** — 축을 빼고
+       *   프롬프트 박스 손실을 받는다. 알려진 한계(백로그 ⓐ "진짜 산문인데 figure 안")에
+       *   해당하며 실측 손실은 Feng `11@37`(`ok` → 상단 169.5pt 손실) 1행이다.
+       * ★ **스캔 PDF는 대상이 아니다**(의도된 보류) — 페이지 전체가 래스터라 `paraOnImage`가
+       *   전건 발동해 무발동 = 종전 동작(Harley-1990 `2@3`·science-245 `4@4`). 현대 PDF 우선. */
+      const paraExempt = p => {
+        if (p.imgInk_ === undefined)
+          p.imgInk_ = paraOnImage(p) || paraGraphic(p) > PARA_MAX_GRAPHIC;
+        return p.imgInk_;
+      };
+      /* ── 단락 상단 클램프 (v2.25.0) ───────────────────────────────────────────────
+       * ★ v2.21.0 경계 벗기기와 **같은 계약**이다: `incl`·`ry0`·`stopReason`·`farBoundary`를
+       *   한 값도 건드리지 않고 "클램프했을 때의 상단"만 계산해 돌려준다. 점수·방향 선택·dedup
+       *   순위는 전부 불변이고 방출 상자만 줄어든다.
+       *   스캔 흐름을 바꾸는 초안(블록 루프 안에서 stop)은 적대 리뷰에서 네 갈래로 깨졌다:
+       *   ⓐ table 본체 롤백(v2.24.1)을 앞질러 상자가 **커진다** ⓑ 첫 블록에서 `incl`이 비면
+       *   캡션 폭 RETRY로 넘어가 다른(더 큰) 상자가 나온다 ⓒ `farBoundary`가 단락 하단이 되어
+       *   `farClosed`가 뒤집히고 `hugeExempt`·`boundary` 항이 최대 9.2점 흔들려 **방향이 바뀐다**
+       *   ⓓ 부분 블록이 `blockTrace`와 어긋나 `markTrimmed`가 엉뚱한 항목을 고친다.
+       *   전부 "판정 단위를 바꾸려다 판정 흐름을 바꾼" 데서 나왔다. 상자만 줄인다.
+       * 판정: 영역 안에서 끝나는 단락 중 **캡션 컬럼을 가로막는** 가장 아래 것의 하단.
+       *   가로막음의 분모는 밴드가 아니라 캡션 컬럼이다 — 밴드는 이미 가로로 과포함돼 있을 수
+       *   있고(Harley `2@3` 실측 전폭 밴드에서 옆 컬럼 본문이 0.47을 덮었다) 그러면 옆 컬럼
+       *   산문이 그림을 자른다.
+       * 면제: 단락 자기 상자가 래스터 안·프레임 안·그림 잉크 위. 그림 안의 진짜 산문(프롬프트
+       *   박스)은 모양으로 안 갈리므로 바깥 맥락이 필요하다(테두리 예외 v2.9.0과 같은 유래).
+       *   **스캔 PDF는 대상이 아니다**(의도된 보류) — 페이지 전체가 래스터라 전건 면제되어
+       *   무발동 = 종전 동작. 현대 PDF 개선을 우선한다. */
+      let paraTop = null;
+      if (paraCol && bodyParas.length && incl.length) {
+        const colW = Math.max(1, paraCol[1] - paraCol[0]);
+        const colBox = { left: paraCol[0], w: colW };
+        if (ox(colBox, { left: bx0, w: bx1 - bx0 }) >= PARA_COL_MIN_OX * colW) {
+          const ry0 = incl[incl.length - 1][0], ry1 = incl[0][1];
+          for (const p of bodyParas) {
+            const py1 = p.y1 * S;
+            if (py1 <= ry0 || py1 >= ry1) continue;              // 영역 안에서 끝나는 것만
+            if (paraTop !== null && py1 <= paraTop) continue;    // 이미 더 아래를 찾았다
+            if (ox({ left: p.x0, w: p.x1 - p.x0 }, colBox) < PARA_BLOCK_COV * colW) continue;
+            if (paraExempt(p)) continue;
+            paraTop = py1;
+          }
+        }
+      }
+
+      /* ── x 클램프용 재료 (v2.26.0) — **판정은 여기서 하지 않는다** ─────────────────
+       * scan은 "어떤 단락이 캡션 컬럼을 가로막는가"만 모아 돌려주고 실제 x 축소는 방출 지점에서
+       * 한다. 이유 셋(적대 리뷰): ⓐ scan 시점엔 좌우 잉크 확장이 아직 안 끝나 **밴드가 방출
+       * 상자가 아니다** — 밴드를 우주로 삼으면 확장이 정당하게 넓힌 부분을 도로 자른다
+       * (Pylkkänen `1@2` 우 14.6pt 손실 실측) ⓑ 최종 상단은 `max(peelTop, paraTop)`인데 peel이
+       * 전수 273 대 19로 지배적이라, 여기서 paraTop만 보고 x를 재면 **이미 없어진 블록의 단락**을
+       * 근거로 자르게 된다 ⓒ 컬럼 재분할 scan은 결과를 버리므로 여기서 잉크를 읽으면 전부 죽은
+       * 계산이다(밴드 면적만큼의 픽셀 판독이 통째로 낭비). */
+      /* ★ 여기에는 **캡션 컬럼 조건을 걸지 않는다.** 상단 클램프는 "내 컬럼을 가로막나"를 묻지만
+       * x 클램프가 빼야 할 단락은 정확히 **옆 컬럼**에 있는 것들이다(Pylkkänen 좌 219pt ·
+       * science-1247125 우 193pt는 전부 반대 컬럼 본문). 컬럼 조건을 여기 걸면 규칙이 죽는다. */
+      const paraBlockers = incl.length ? bodyParas.filter(p => !paraExempt(p)) : [];
+      /* 경계 벗기기 판정 (v2.21.0). `incl`은 건드리지 않고 "벗겼을 때의 상단"만 계산해 돌려준다 —
+       * 점수·선택은 벗기기 전 상자로 그대로 간다(위 상수 주석 참조). 마스크가 없으면(=규칙 비활성)
+       * null이다. 한 블록만 벗긴다: 두 블록 이상 벗기는 변형은 ΔIoU가 나아지지 않았고 깨끗한
+       * 정답의 악화만 늘었다(전수 시뮬레이션). */
+      let peelTop = null;
+      if (grid.textMask_ && incl.length >= 2) {
+        const [ob0, ob1] = incl[incl.length - 1], nextTop = incl[incl.length - 2][0];
+        const gapPt = (nextTop - ob1) / S;
+        const bl = blockLines(ob0, ob1);
+        const boxPt = { x0: bx0, y0: ob0 / S, x1: bx1, y1: ob1 / S };
+        const width = monoWidthStats(lines, boxPt);
+        if (!width.mono) {
+          const g = graphicInkRatio(grid, grid.textMask_, { x0: rx0, y0: ob0, x1: rx1, y1: ob1 });
+          const domShare = blockDomShare(bl, dom);
+          const plainText = g <= PEEL_MAX_GRAPHIC &&
+            (ob1 / S <= PEEL_TOP_BAND_PT || gapPt >= PEEL_MIN_GAP_PT);
+          const bodyFont = domShare !== null && domShare >= PEEL_DOM_MIN_SHARE &&
+            g <= PEEL_DOM_MAX_GRAPHIC && !hasImage(ob0, ob1) && !hasBorder(ob0, ob1) &&
+            gapPt >= PEEL_DOM_MIN_GAP_PT;
+          if (plainText || bodyFont) peelTop = nextTop;
+        }
+      }
+      /* 밴드 단위 관측 (진단 전용) — 블록 분할의 판정 우주를 그대로 남긴다. 스캔은 캡션 위(`rcap`
+       * 행까지)만 보므로 "빈 행 K/rows"의 분모도 페이지 전체가 아니라 rcap이다. 뷰어가 이 값을 다시
+       * 세면 렌더러 차이(headless↔GPU)로 어긋나므로 기록해서 넘긴다. */
+      const bandStats = trace ? (() => {
+        let blankRows = 0;
+        for (let yy = 0; yy < rcap; yy++) if (blank(yy)) blankRows++;
+        /* 밴드 전체(0 ~ rcap)의 행별 잉크 분해. 블록 단위 `rowProfile`만으로는 **블록 사이**와
+         * **스캔이 stop으로 끊겨 도달하지 못한 위쪽**이 비어서, 뷰어 막대가 곳곳이 끊긴다.
+         * 판정 우주 전체를 그리려면 밴드 단위가 필요하다 — 캡션 아래(rcap 이후)는 스캔 자체가
+         * 보지 않으므로 원리적으로 여기까지가 전부다. */
+        const bins = Math.max(1, Math.ceil(rcap / PROFILE_BIN_PX));
+        const txt = new Array(bins).fill(0), gfx = new Array(bins).fill(0);
+        for (let yy = 0; yy < rcap; yy++) {
+          const bi = Math.min(bins - 1, Math.floor(yy / PROFILE_BIN_PX)), row = yy * grid.W;
+          for (let x = rx0; x < rx1; x++) {
+            if (!grid.ink[row + x]) continue;
+            if (grid.textMask_[row + x]) txt[bi]++; else gfx[bi]++;
+          }
+        }
+        return { bandPt: [+bx0.toFixed(1), +bx1.toFixed(1)],
+          profPt: [+(qx0 / S).toFixed(1), +(qx1 / S).toFixed(1)], thr, rows: rcap, blankRows,
+                 rowProfile: { y0Pt: 0, binPt: +(PROFILE_BIN_PX / S).toFixed(4), txt, gfx } };
+      })() : null;
+      return { incl, rx0, rx1, stopReason, stopNstop, farBlankPx, unprotectedBodyStops: 0,
+        blockTrace: trace, peelTop, paraTop, paraBlockers, bandStats };
     };
+    /* 컬럼 인식 재분할 (작업 중) — 캡션이 속한 본문 컬럼 안에서만 빈 행을 세어 블록을 나눈다.
+     * 밴드 전폭으로 세면 다단 조판에서 좌우 컬럼의 줄 간격이 어긋나 빈 행이 안 생기고 페이지가
+     * 한 덩어리가 된다(→ "이게 본문인가"를 한 번밖에 못 묻는다). 블록의 **면적**은 위 바깥 경계
+     * 복원이 밴드 잉크로 되돌리므로, 여기서 바뀌는 것은 **판정 단위**뿐이다.
+     * 재분할 결과가 비면 원본을 유지한다 — 이 규칙이 figure를 잃는 방향으로는 실패하지 않는다. */
+    let up_ = scan(x0, x1);
+    {
+      const pr = profRange(x0, x1, capbox, bodyCols);
+      if (pr[0] !== x0 || pr[1] !== x1) {
+        const alt = scan(x0, x1, pr[0], pr[1]);
+        /* ★ 컬럼 스캔은 **기각 신호로만** 쓴다 — `incl`이 비고 `stop=body`일 때만 채택한다.
+         * 뜻: "캡션 **자기 컬럼** 바로 위가 본문이다" = 이 앵커 위에는 figure가 없다.
+         * 그 외(블록이 남거나 header/table/page-edge에서 멈춤)는 **기하가 달라졌을 뿐**이고,
+         * 그 기하 변화가 실제로 낸 것은 손해였다([사람] 육안 판정, 전수 v2.22.0↔실험):
+         *   Marchesi `ED.9@36`(1→1 header)·Luques `4@8`(1→3 header)·Parmar `5@9`(23→22 header)
+         *   = 캡션 컬럼 **밖(우측)**에만 있는 figure 내용이 빈 행으로 읽혀 상·하단이 벗겨짐.
+         *   Harley `2@3`(3→2 body)·DeCasper `1@2`(0→1 body) = 남은 블록의 기하 변화로 clip·이동.
+         * 반대로 `incl`이 **0이 되는** 갈래는 상자를 바꿀 수 없고 후보를 없앨 뿐이라 이 손해가
+         * 구조적으로 불가능하다. 유일한 표적이자 실측 성공 사례가 Viswanathan `1@1`(1→0 body):
+         * 본문 속 줄바꿈 꼬리 `Fig. 1.` 유령 앵커가 사라지고 진짜 캡션이 num을 가져간다.
+         * ⚠ 실패 방향이 `not_detected` 한쪽이므로 넓히려면 별도 근거가 필요하다. */
+        const rejectOnly = alt.incl.length === 0 && alt.stopReason === "body";
+        if (rejectOnly) {
+          dbg(`  Fig${num}: RESPLIT reject prof=[${pr[0].toFixed(0)},${pr[1].toFixed(0)}]` +
+            ` blocks ${up_.incl.length} → 0 stop=body`);
+          up_ = alt;
+        }
+      }
+    }
     let { incl, rx0, rx1, stopReason: upStopReason, farBlankPx: upFarBlankPx,
-      unprotectedBodyStops: upBodyStops, stopNstop: upStopNstop } = scan(x0, x1);
+      unprotectedBodyStops: upBodyStops, stopNstop: upStopNstop,
+      blockTrace: upBlockTrace, peelTop: upPeelTop, paraTop: upParaTop,
+      paraBlockers: upParaBlockers, bandStats: upBandStats } = up_;
     if (!incl.length && (Math.abs(x0 - capbox.left) > 2 || Math.abs(x1 - (capbox.left + capbox.w)) > 2)) {
       dbg(`  Fig${num}: RETRY with capbox width`);
       ({ incl, rx0, rx1, stopReason: upStopReason, farBlankPx: upFarBlankPx,
-        unprotectedBodyStops: upBodyStops, stopNstop: upStopNstop } =
-        scan(capbox.left, capbox.left + capbox.w));
+        unprotectedBodyStops: upBodyStops, stopNstop: upStopNstop,
+        blockTrace: upBlockTrace, peelTop: upPeelTop, paraTop: upParaTop,
+        paraBlockers: upParaBlockers, bandStats: upBandStats } = scan(capbox.left, capbox.left + capbox.w));
     }
 
     const measureCandidate = (dir, fx0, fx1, ry0, ry1, raster, stopReason,
@@ -2643,12 +3472,23 @@ function detectPage(pg, lines, dom, grid, dbg, captionData, diag, pass = 0) {
         valid: true,
         fig: { num, raster_: raster, page: pg.num,
           x0: fx0 - 10, x1: fx1 + 10, y0: ry0 - 8, y1: ry1 + 4,
+          /* 벗겼을 때의 상단. 같은 여백(−8)을 유지해 방출 상자의 기하 관습을 깨지 않는다.
+           * `h_`는 **벗기기 전** 값을 그대로 둔다 — dedup 순위 입력이라 여기를 바꾸면 같은 num
+           * 경합의 승자가 바뀔 수 있고, 그건 이 규칙이 관여하지 않기로 한 영역이다. */
+          peelTop_: upPeelTop === null || upPeelTop === undefined ? null : upPeelTop - 8,
+          /* 단락 클램프 상단 (v2.25.0). peelTop_과 같은 계약·같은 여백(−8)이고 방출 직전에
+           * 둘 중 더 타이트한 쪽이 적용된다. `h_`는 여기서도 건드리지 않는다(dedup 순위 불변). */
+          /* 정수 픽셀로 올림(축소 방향) — 소수 y0도 크롭을 리샘플링시킨다(적대 리뷰 #1). */
+          paraTop_: upParaTop === null || upParaTop === undefined ? null : Math.ceil(upParaTop) - 8,
+          /* x 클램프 재료 (v2.26.0) — 판정은 방출 지점에서. 상자만 줄이는 계약은 동일하다. */
+          paraBlockers_: upParaBlockers && upParaBlockers.length ? upParaBlockers : null,
           h_: Math.round(capBottom * S) - ry0, caption: capText, captionBox },
         metrics,
         score: figureScore(metrics)
       };
       const upCandidateId = registerDiagnosticCandidate(upCandidate, "up", "scan", 0,
-        { x0: fx0, y0: ry0, x1: fx1, y1: ry1 }, { seedBoxPt: null });
+        { x0: fx0, y0: ry0, x1: fx1, y1: ry1 },
+        { seedBoxPt: null, blockTrace: upBlockTrace, upStopReason, bandStats: upBandStats });
       if (diag) for (const clamp of sameBaselineClamps) diag.add("relation", {
         page: pg.num, pass, decision: "clamp",
         claimantCandidateId: upCandidateId,
@@ -3098,6 +3938,195 @@ function observeAdjacentComposition(regions, pageHeightPt, repeatedLineKeys) {
 const FURNITURE_STRIP_MAX_HEIGHT = 0.05;
 const FURNITURE_STRIP_MIN_WIDTH = 0.80;
 
+/* ---- SI 목록 페이지 거부 (v2.20.0) ---------------------------------------------------------
+ * 보충자료 캡션 목록 페이지("Figure S1 …" 나열)를 여러 앵커가 나눠 잘라 figure로 방출하던 결함
+ * (PLOS pbio p23·p24, Edgecomb p14, springer s11427 p13).
+ *
+ * 판정 스코프가 **페이지**인 것이 이 규칙의 핵심이다. 선행 설계(고정폭 단독 축)는 영역 하나만 보고
+ * "이게 figure냐"를 물었고, 그래서 텍스트로만 된 **진짜** figure(FASTA 염기서열 리스팅 — 비례 글꼴)와
+ * 캡션 목록 조각을 원리상 가르지 못해 중단 조건에 걸렸다. 진짜 텍스트 figure는 자기 페이지의 유일한
+ * 청구자이고, 목록 페이지는 5~7개 앵커가 한 텍스트 덩어리를 나눠 갖는다 — 개수가 그 차이를 잡는다.
+ *
+ * ① graphicRatio = (렌더 잉크 − 텍스트 줄 상자에 덮인 잉크) / 상자 면적. 기존 metrics.inkDensity와
+ *    단위는 같지만 다른 양이다(전수 실측: inkDensity는 FP 중앙 0.140 / 정답 중앙 0.176으로 두 부류를
+ *    전혀 못 가른다). **디센더 보정이 필수** — pdf.js 줄 상자는 top = baseline − fontSize라 g·p·y·괄호
+ *    잉크가 상자 밖에 남고, 보정 없이는 표적 행조차 0이 아니다(PLOS pbio S.1~S.3: 0.0028~0.0088 ↔ 0).
+ * ② 고정폭 예외 — 코드·의사코드·정렬 리스팅은 글자로만 이뤄진 진짜 figure다. 글꼴 **이름**으로 판정
+ *    하지 않는다(`SFTT1095` 같은 서브셋 이름은 신뢰 불가). cv 단독으로는 부족하다: Ackerman 6@16
+ *    (cv 0.0500)·7@16(cv 0.0691)이 완벽한 고정폭인데 조각 90여 개 중 8~10%의 이탈값이 평균을 끌어
+ *    올린다 — 중앙값 근방비율(0.924·0.901)이 조판을 정확히 반영한다. 근방비율은 조각이 1개면 항상
+ *    1.0이라 조각 수 하한이 없으면 근거 없이 통과한다.
+ * ③ 개수 3은 **마진 선택**이다 — 두 측정 기준을 구별해 읽어야 한다.
+ *    ⓐ 운영 모집단(후보 · g ≤ 0.01)에서 n=2 페이지는 1개(Edgecomb 1·2@p13)이고 **전부 FP**,
+ *       n=3은 0, n≥4는 4페이지·19행 전부 FP다. 즉 **2로 낮춰도 코퍼스 정답 손실은 0**이고 FP를
+ *       4행 더 잡는다 — "2로 낮추면 정답이 죽는다"가 근거인 것이 아니다.
+ *    ⓑ 더 넓은 밴드(방출행 · g ≤ 0.02)에서는 n=2가 정답 우세 구간이다(4페이지 중 3: Ackerman
+ *       6·7@16, NBER 1·2@35, acm 5·6@39). n=2 근방에 정답이 실재한다는 증거는 이쪽이다.
+ *    3을 고른 이유는 n=3이 **두 기준 모두에서 비어 있어** 관측된 어떤 행도 경계에 붙지 않기 때문이다.
+ * ④ 임계 0.01 — 차단되는 FP 중 최대 g = 0.00933 ↔ 첫 정답 손실이 나오는 g = 0.04717로 **5.06배
+ *    빈 구간**이고 임계는 그 아래쪽에 보수적으로 놓인다. (별건인 본문 블록 벗기기 릴리스가
+ *    Ackerman 6·7@16의 g를 올리면 이 배율은 갱신 대상이다 — 방향은 안전 쪽이다.)
+ *
+ * ★ 명명된 실패 모드: **비고정폭 텍스트 전용 진짜 figure가 3개 이상 한 페이지에 쌓인 보충자료
+ *   페이지.** n=2까지는 실재하고 n=3은 관측 0이다. 고정폭 예외가 가장 흔한 형태(코드 리스팅)를
+ *   막아 주지만 비고정폭(FASTA·표형 데이터)은 막지 못한다.
+ * ★ 표 지원이 들어오면 **"표로 주장된 영역에는 적용하지 말 것"** — 비례 글꼴로 조판된 표는 고정폭이
+ *   아니라 이 규칙에 죽는다. 방출행 중 table 캡션과 교차하는 19행 가운데 6행이 저-g 밴드에 있고
+ *   그중 4행이 정답이다(개수 축이 지금은 그 4행을 전부 살리지만, 표 영역이 후보가 되면 달라진다). */
+const TEXT_LISTING_MAX_GRAPHIC = 0.01;   // 텍스트 차감 잉크 비율 상한
+const TEXT_LISTING_MIN_COUNT = 3;        // 같은 페이지에서 동시 만족하는 선택 후보 수
+const TEXT_LISTING_DESCENDER = 0.25;     // 줄 상자를 아래로 넓히는 fontSize 배수 (디센더 몫)
+const TEXT_LISTING_PAD_PX = 1;           // 안티에일리어싱·이탤릭 오버행
+const MONO_MIN_CHARS = 40;               // 미만이면 측정 불가 → "고정폭 아님"
+const MONO_MAX_CV = 0.05;
+const MONO_MIN_FRAGS = 4;                // 근방비율 갈래의 필수 가드
+const MONO_MIN_NEAR_MEDIAN = 0.85;
+const MONO_NEAR_MEDIAN_TOL = 0.02;       // 중앙값 ±2%
+
+/* ---- 경계 벗기기 (v2.21.0) — 영역의 가장 바깥 블록이 '남의 텍스트'면 방출 상자에서 뺀다.
+ * 방출 상자가 사각형이라 **바깥 블록만** 경계를 바꾸므로 거기만 본다.
+ * ★ 이 규칙은 **점수·선택에 관여하지 않는다** — `ry0`(=후보 상단)는 그대로 두고 방출 직전에 상자만
+ *   줄인다. 블록을 `incl`에서 빼면 metrics(면적·높이비·잉크밀도) → score → 후보 선택이 연쇄로
+ *   바뀌는데, 그건 ΔIoU 시뮬레이션이 모델링하지 못한 영역이다(측정한 것은 '상자만 줄었을 때'다).
+ * ★ 실체는 `header_included`·`body_text_sliver` 교정이다(전수 실측: 각 40/40·37/37 개선, 악화 0).
+ *   `body_text_heavy`에는 21%만 닿는다 — DEV.md 백로그 참조. "본문 과포함 해결"이 아니다.
+ * 핵심 축은 **아래 갭**: figure 자신의 라벨 줄은 그림에 붙어 있고(중앙 6pt) 남의 텍스트는 떨어져
+ * 있다(12~17pt). 갭을 20→14pt로 낮추면 깨끗한 `ok` 악화가 1→4행이 되고 그 부류 순합이 음수가 된다. */
+const PEEL_MAX_GRAPHIC = 0.002;     // 그림 잉크가 사실상 없는 블록
+const PEEL_TOP_BAND_PT = 56;        // 페이지 상단 furniture 대역(머리글) — 갭 없이도 남의 것
+const PEEL_MIN_GAP_PT = 20;         // 그 밖에서는 이만큼 떨어져야 '남의 텍스트'
+const PEEL_DOM_MIN_SHARE = 0.5;     // 본문 폰트 점유 갈래 — 갭을 좁혀 주는 대신 dom을 요구한다
+const PEEL_DOM_MAX_GRAPHIC = 0.05;
+const PEEL_DOM_MIN_GAP_PT = 10;
+
+/* 블록 텍스트 중 문서 도미넌트 폰트가 차지하는 글자 비율. 본문이 딸려온 블록은 1에 가깝고
+ * figure 자신의 라벨·범례는 0에 가깝다(블록 단위 중앙값 실측: 결함군 0.376 ↔ 깨끗한 ok 0). */
+function blockDomShare(blockLines, dom) {
+  let domChars = 0, allChars = 0;
+  for (const u of blockLines) for (const fr of (u.frags || [])) {
+    const n = typeof fr.s === "string" ? fr.s.length : 0;   // 무가드 접근 금지 (v2.19.5 리뷰)
+    allChars += n; if (fr.font === dom) domChars += n;
+  }
+  return allChars ? domChars / allChars : null;
+}
+
+/* 페이지의 텍스트 줄 상자를 픽셀 마스크로 칠한다(디센더 보정 포함). 한 페이지당 W×H 바이트라
+ * 크롭 생성 전에 참조를 버려야 한다 — 크롭 창과 동시 상주하면 B7의 캔버스 회수 압력이 돌아온다. */
+function buildTextInkMask(grid, lines) {
+  const mask = new Uint8Array(grid.W * grid.H);
+  for (const line of lines) {
+    const x0 = Math.max(0, Math.floor(line.left * S - TEXT_LISTING_PAD_PX));
+    const x1 = Math.min(grid.W, Math.ceil((line.left + line.w) * S + TEXT_LISTING_PAD_PX));
+    const y0 = Math.max(0, Math.floor(line.top * S - TEXT_LISTING_PAD_PX));
+    const y1 = Math.min(grid.H, Math.ceil((line.top + line.h) * S
+      + line.h * S * TEXT_LISTING_DESCENDER + TEXT_LISTING_PAD_PX));
+    for (let y = y0; y < y1; y++) {
+      const row = y * grid.W;
+      for (let x = x0; x < x1; x++) mask[row + x] = 1;
+    }
+  }
+  return mask;
+}
+
+/* 상자 안에서 텍스트가 설명하지 못하는 잉크의 면적 비율. */
+function graphicInkRatio(grid, mask, boxPx) {
+  const x0 = Math.max(0, Math.floor(boxPx.x0)), x1 = Math.min(grid.W, Math.ceil(boxPx.x1));
+  const y0 = Math.max(0, Math.floor(boxPx.y0)), y1 = Math.min(grid.H, Math.ceil(boxPx.y1));
+  let graphic = 0;
+  for (let y = y0; y < y1; y++) {
+    const row = y * grid.W;
+    for (let x = x0; x < x1; x++) if (grid.ink[row + x] && !mask[row + x]) graphic++;
+  }
+  return graphic / Math.max(1, (x1 - x0) * (y1 - y0));
+}
+
+/* 상자 안 텍스트 조각의 (조각폭/글자수)/글꼴크기 분포로 고정폭 조판을 판정한다.
+ * ★ pdf.js는 글자 단위 폭을 주지 않는다 — 조각 폭/글자 수로 근사할 수밖에 없다.
+ * ★ 조각 필드를 무가드로 읽지 않는다: 진단 경로에만 있는 throw는 results/에 안 보여 표본을 조용히
+ *   줄인다(v2.19.5 적대 리뷰 지적). 여기는 판정 경로이므로 더더욱 던지면 안 된다. */
+function monoWidthStats(lines, boxPt) {
+  const ratios = [];
+  let charCount = 0;
+  for (const line of lines) {
+    if (!line.frags) continue;
+    for (const f of line.frags) {
+      const cx = f.left + f.w / 2, cy = f.top + f.h / 2;
+      if (cx < boxPt.x0 || cx > boxPt.x1 || cy < boxPt.y0 || cy > boxPt.y1) continue;
+      const n = typeof f.s === "string" ? f.s.length : 0;
+      if (!(n > 0) || !(f.w > 0) || !(f.h > 0)) continue;
+      ratios.push((f.w / n) / f.h);
+      charCount += n;
+    }
+  }
+  /* 모집단 분산을 쓴다 — 이 조각들은 상자 안 조판의 표본이 아니라 전수다. */
+  let cv = null;
+  if (ratios.length >= 2) {
+    const mean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+    if (mean > 0) {
+      const varr = ratios.reduce((a, b) => a + (b - mean) * (b - mean), 0) / ratios.length;
+      cv = Math.sqrt(varr) / mean;
+    }
+  }
+  const sorted = ratios.slice().sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
+  const fracNearMedian = median > 0
+    ? ratios.filter(r => Math.abs(r - median) <= MONO_NEAR_MEDIAN_TOL * median).length / ratios.length
+    : null;
+  const mono = charCount >= MONO_MIN_CHARS && (
+    (cv !== null && cv <= MONO_MAX_CV) ||
+    (ratios.length >= MONO_MIN_FRAGS && fracNearMedian !== null &&
+      fracNearMedian >= MONO_MIN_NEAR_MEDIAN));
+  return { fragCount: ratios.length, charCount, cv, fracNearMedian, mono };
+}
+
+/* 페이지 단위 판정. 후보가 문턱 미만이면 규칙이 원리상 발동할 수 없으므로 마스크·잉크 주사를 아예
+ * 건너뛴다(코퍼스 대다수 페이지가 후보 1~2개다). 반환은 거부 대상 후보 배열과 계측 map이며,
+ * 발동하지 않으면 빈 배열이다 — 부분 적용(일부만 거부)은 실측상 관측되지 않지만 정의상 가능하다. */
+function textListingRejects(grid, pd, figs, sharedMask = null) {
+  const lines = pd.lines;
+  if (figs.length < TEXT_LISTING_MIN_COUNT) return { rejected: [], metricsByFig: null };
+  /* ★ 렌더 잉크가 **거부**의 근거가 되는 첫 규칙이라, 픽셀을 믿을 수 있을 때만 판정한다 (B7).
+   * 회수된 캔버스는 전면 투명이고 `makeInk`가 흰 배경으로 합성하므로 **잉크 0**으로 읽힌다 —
+   * 그러면 그 페이지 후보 전부가 `graphicRatio = 0` → 목록으로 오판돼 **페이지 전체 방출이
+   * 삭제**된다. v2.20.0 이전에 같은 조건의 귀결은 "못 찾음"이었으므로 실패 **방향이 뒤집힌다**.
+   * 카나리아(`makeInk`의 불투명 비율 검사)는 `!opts.renderPage` 즉 엔진 소유 캔버스에서만 돌아
+   * **호스트 주입 캔버스(Margin 뷰어)에서는 꺼져 있으므로** 그 경로를 여기서 닫는다.
+   * 잉크가 하나도 없는 페이지는 목록 페이지일 수 없다 — 목록은 글자 잉크로 가득하다.
+   * 남는 노출은 **부분 회수**(앞부분만 그려진 페이지)이고 이 바닥으로는 못 막는다(엔진 소유
+   * 캔버스에서는 카나리아가 잡는다 — DEV.md 백로그 B7). */
+  let anyInk = false;
+  for (let i = 0; i < grid.ink.length; i++) if (grid.ink[i]) { anyInk = true; break; }
+  if (!anyInk) return { rejected: [], metricsByFig: null };
+  /* 마스크는 페이지당 **한 장**이어야 한다 — 경계 벗기기(v2.21.0)가 detectPage 동안 같은 마스크를
+   * 쓰므로 호출부가 그걸 넘겨준다. 두 장이 동시 상주하면 `--jobs 2`에서 캔버스가 회수돼
+   * `FIG_RENDER_ERROR`가 난다(2026-07-30 전수 실측 10편). 안 넘어오면 여기서 만든다. */
+  let mask = sharedMask || buildTextInkMask(grid, lines);
+  const metricsByFig = new Map(figs.map(f => [f, textListingMetrics(grid, mask, lines, f)]));
+  mask = null;   // 크롭 생성 전에 W×H 마스크 참조를 버린다 (B7 — 크롭 창과 겹치면 안 된다)
+  const listed = figs.filter(f => metricsByFig.get(f).listingLike);
+  if (listed.length < TEXT_LISTING_MIN_COUNT) return { rejected: [], metricsByFig };
+  /* 페이지 판정을 **판정한 자리에서** 기록한다 — 12-B N−1 대칭이 이 값을 읽는다. 호출부가 따로
+   * 세팅하게 두면 그 한 줄을 빠뜨리는 순간 대칭이 조용히 영구 무력화되고, 별도 인자로 넘기던
+   * 판이 정확히 그 뒷문을 열어 뒀다(적대 리뷰 지적 — 인자 누락 뮤테이션이 테스트를 통과했다). */
+  pd.listingPage_ = true;
+  return { rejected: listed, metricsByFig };
+}
+
+/* 상자 하나에 대한 목록형 판정. grid/mask/boxPx는 px, lines는 pt 좌표계다. */
+function textListingMetrics(grid, mask, lines, boxPx) {
+  const graphicRatio = graphicInkRatio(grid, mask, boxPx);
+  const width = monoWidthStats(lines, {
+    x0: boxPx.x0 / S, y0: boxPx.y0 / S, x1: boxPx.x1 / S, y1: boxPx.y1 / S,
+  });
+  return {
+    graphicRatio: +graphicRatio.toFixed(6),
+    cv: width.cv === null ? null : +width.cv.toFixed(4),
+    fracNearMedian: width.fracNearMedian === null ? null : +width.fracNearMedian.toFixed(4),
+    fragCount: width.fragCount, charCount: width.charCount, mono: width.mono,
+    listingLike: graphicRatio <= TEXT_LISTING_MAX_GRAPHIC && !width.mono,
+  };
+}
+
 /* PB-4B 12-B 잠정 문턱 (v2.19.0). Q6 전수 라운드에서 정답 26행과 오발 2행 사이에 빈 구간이
  * 있었고(textCoverage 0.29↔0.86, selectionAreaRatio 0.42↔0.014) 캡션이 다음 장으로 밀리는 원인
  * 자체가 "그림이 페이지를 거의 채웠다"라서 면적 하한은 현상의 정의에서 나온다. 불통과는 abstain
@@ -3375,6 +4404,16 @@ async function observeAdjacentPages(pageData, dom, diag, opts, checkAborted, sna
           num: info && info.num,
         };
       });
+      /* same-page에서 SI 목록으로 거부된 페이지만 검사한다 (v2.20.0, 대칭 적용). 마스크는 **판정
+       * 순간에만** 만들고 즉시 버린다 — 앵커 루프 안에서 `makeCropPng`가 돌기 때문에, 루프 밖에서
+       * 들고 있으면 페이지당 W×H 바이트가 크롭 창과 동시 상주한다(same-page 경로에서 명시적으로
+       * 피한 바로 그 상황 — B7). 목록 페이지는 코퍼스에서 드물어 재계산 비용이 무시할 만하다. */
+      const targetIsListing = pd.listingPage_ === true;
+      const listingLikeBox = box => {
+        if (!targetIsListing) return false;
+        const mask = buildTextInkMask(grid, pd.lines);
+        return textListingMetrics(grid, mask, pd.lines, box).listingLike;
+      };
       for (const anchor of anchors) {
         const relationIds = [];
         for (const region of regions) {
@@ -3398,13 +4437,19 @@ async function observeAdjacentPages(pageData, dom, diag, opts, checkAborted, sna
           .filter(region => selectedRegionSet.has(region.regionId) &&
             claimRelationsByRegion.get(region.regionId).length)
           .map(region => region.regionId);
-        const captionCompetitionAnchorIds = targetAnchors
-          .filter(other => String(other.num) !== String(anchor.num))
+        /* 경합 판정은 **진단 무관 값(num)**으로 한다 (v2.19.5). 이전 판은 이 boolean을
+         * `anchorId` 목록 길이로 계산했는데 anchorId는 `diag ? registerAnchor(...) : null`이라
+         * `.filter(Boolean)`이 진단 없는 구성에서 목록을 통째로 비웠다 — 즉 12-B 7조건 AND 게이트의
+         * `unclaimed` 항이 소비자(Margin)에게는 영구히 꺼져 있고 `--graph`를 켜면 켜졌다.
+         * public 게이트 입력은 진단 opt-in에 종속될 수 없다. id 목록은 record 추적용으로만 남긴다. */
+        const captionCompetitors = targetAnchors
+          .filter(other => String(other.num) !== String(anchor.num));
+        const captionCompetitionAnchorIds = captionCompetitors
           .map(other => other.anchorId).filter(Boolean).sort();
         /* 12-A에는 adjacent selection 자체가 없으므로 세 번째 guard의 현재 관측값은 0이다.
          * resolver가 생기면 같은 target page에서 먼저 확정된 다른 selection ID가 여기에 들어간다. */
         const competingSelectionAnchorIds = [];
-        const captionCompetition = captionCompetitionAnchorIds.length > 0;
+        const captionCompetition = captionCompetitors.length > 0;
         const unclaimed = ownedIntersectionRegionIds.length > 0 || captionCompetition ||
           competingSelectionAnchorIds.length > 0
           ? false
@@ -3488,6 +4533,18 @@ async function observeAdjacentPages(pageData, dom, diag, opts, checkAborted, sna
           if (outHeightRatio < FURNITURE_STRIP_MAX_HEIGHT &&
               outWidthRatio >= FURNITURE_STRIP_MIN_WIDTH) {
             blocked.push("blocked-furnitureStrip");
+            outputBoxPx = null;
+          }
+          /* SI 목록 페이지 거부의 N−1 대칭 (v2.20.0). same-page 거부는 그 앵커의 claim을 inactive로
+           * 만들어 **12-B 대상으로 승격시킨다** — 목록 페이지가 연달아 있으면(PLOS pbio p23·p24)
+           * 뒤 페이지 앵커가 앞 목록 페이지를 N−1로 잡아 같은 쓰레기를 다시 방출할 수 있다.
+           * 현재 대상 4편은 textCoverage·selectionArea에서 자연히 막히지만 **희망이 아니라 구성으로
+           * 닫는다**(v2.19.3이 같은 이유로 같은 바닥을 두 곳에 넣었다).
+           * 페이지 조건과 상자 조건의 AND다: 목록으로 판정된 페이지라도 그림 잉크가 있는 상자는
+           * 진짜 figure이므로 살린다(12-B 방출 28행 중 SERENA 2@10이 저-g 밴드에 있고, 그 페이지는
+           * 목록 페이지가 아니어서 페이지 조건에서 걸러진다). */
+          if (outputBoxPx && listingLikeBox(outputBoxPx)) {
+            blocked.push("blocked-textListing");
             outputBoxPx = null;
           }
           if (outputBoxPx) emittedNums.add(String(anchor.num));   // 같은 num 두 앵커의 F8 중단 방지
@@ -3620,7 +4677,21 @@ async function extract(data, opts = {}) {
         page: pd.num, widthPx: grid.W, heightPx: grid.H, scale: S,
         imageCount: pd.images.length, decision: "same-page-detect",
       });
+      /* 텍스트 잉크 마스크는 페이지당 **한 장**만 만들어 경계 벗기기(detectPage 안)와
+       * `textListingRejects`(dedup 앞)가 나눠 쓴다. 두 장이 동시 상주하면 `--jobs 2`에서 캔버스가
+       * 회수돼 `FIG_RENDER_ERROR`가 난다(2026-07-30 실측 10편). 크롭 생성 전에 참조를 버린다.
+       * ★ 잉크가 하나도 없는 페이지(=회수된 캔버스)에서는 만들지 않는다 — 벗기기는 `graphicRatio`가
+       *   0이면 발동하므로, 백지 페이지에서 모든 후보의 상단이 잘려 **조용히 틀린 상자**가 된다.
+       *   `textListingRejects`가 같은 이유로 anyInk 바닥을 갖는다(B7). */
+      let pageAnyInk = false;
+      for (let i = 0; i < grid.ink.length; i++) if (grid.ink[i]) { pageAnyInk = true; break; }
+      if (pageAnyInk) grid.textMask_ = buildTextInkMask(grid, pd.lines);
       let figs = detectPageWithFloor(pd, dom, grid, dbg, diag);
+      /* `let`이어야 한다 — `const`로 두면 크롭 생성(`makeCropPng`)까지 W×H 마스크가 도달 가능한
+       * 채로 남아 위 주석의 "크롭 창과 겹치지 않는다"가 거짓이 된다 (v2.21.0 적대 리뷰 F3).
+       * `grid.textMask_ = null`은 grid 쪽 참조만 끊는다. */
+      let pageTextMask = grid.textMask_ || null;
+      grid.textMask_ = null;
       /* 중복 번호 dedup은 (num, page) 인스턴스 단위 (PDFViewer#14) — 합본 논문·부록 번호 재시작에서
        * 같은 번호가 다른 페이지에 재등장하는 figure를 보존한다. 경쟁은 같은 페이지 안에서만 발생하므로
        * dedup·최소 크기 필터를 페이지 단위로 끝내고, 살아남은 figure만 즉시 크롭해 보관한다.
@@ -3671,6 +4742,144 @@ async function extract(data, opts = {}) {
         }
       }
       figs = kept;
+      /* SI 목록 페이지 거부 (v2.20.0) — 지면 장식 띠와 **같은 자리**(dedup 앞)에 둔다. 뒤에 두면
+       * 래스터 후보가 raster_ 1e9 가산점으로 우승한 뒤 죽고 같은 num의 진짜 후보는 이미 버려져
+       * 복구할 수 없다. 이 규칙은 페이지 상수 기반이라 실측상 부분 적용이 없지만 선례와 자리를 맞춘다.
+       * 판정 자체는 textListingRejects가 소유한다(단위 테스트가 붙는 지점). */
+      {
+        const { rejected: listed, metricsByFig: listingByFig } =
+          textListingRejects(grid, pd, figs, pageTextMask);
+        /* pageTextMask 해제는 x 클램프(아래) 뒤로 미룬다 — 그쪽이 새 마지막 소비자다 (v2.26.0). */
+        if (listed.length) {
+          const rejected = new Set(listed);
+          if (diag) for (const f of listed) {
+            /* 거부된 후보에도 dedup·emission·claim을 남긴다 — 안 남기면 같은 num의 살아남은 후보에
+             * "sole-identity-candidate" 거짓 사유가 붙고 그래프로 이력을 복원할 수 없다 (v2.19.4). */
+            diag.add("dedup", {
+              page: pd.num, num: f.num,
+              candidateId: diag.figCandidateId(f),
+              winnerCandidateId: diag.figCandidateId(f),
+              rankScore: (f.raster_ ? 1e9 : 0) + f.h_,
+              decision: "dropped", reasons: ["text-listing-page"],
+            });
+            diag.add("emission", {
+              page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+              decision: "dropped",
+              textListing: listingByFig.get(f),
+              pageListingCount: listed.length,
+              maxGraphicRatio: TEXT_LISTING_MAX_GRAPHIC, minCount: TEXT_LISTING_MIN_COUNT,
+              reasons: ["text-listing-page"],
+            });
+            diag.add("claim", {
+              page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
+              decision: "inactive", reasons: ["text-listing-page"],
+            });
+          }
+          for (const f of listed) {
+            const info = pd.captionData.infoByAnchor.get(f._anchor);
+            if (info && info.adjacentState_ && info.adjacentState_.selectedFig === f) {
+              info.adjacentState_.emission = "dropped";
+              info.adjacentState_.claim = "inactive";
+            }
+          }
+          figs = figs.filter(f => !rejected.has(f));
+        }
+      }
+      /* 경계 벗기기 적용 (v2.21.0) — **거부 규칙들 뒤, dedup 앞**. 상자만 줄이고 `h_`(dedup 순위)는
+       * 건드리지 않으므로 같은 num 경합의 승자는 불변이다. 거부 뒤에 두는 이유: 거부된 후보의
+       * 상자를 줄이는 것은 무의미하고, 위 두 규칙의 판정 입력(heightRatio·graphicRatio)이
+       * 벗기기 **전** 상자여야 그 규칙들의 실측 문턱이 그대로 유효하다. */
+      for (const f of figs) {
+        /* 두 규칙이 같은 상단을 다투면 **더 타이트한 쪽**을 쓴다. 둘 다 "상자만 줄인다"는 같은
+         * 계약이라 순서에 의존하지 않는다(v2.25.0에서 단락 클램프를 같은 자리에 합류시켰다). */
+        const cands = [f.peelTop_, f.paraTop_].filter(v => v !== null && v !== undefined);
+        if (!cands.length) continue;
+        const top = Math.max(...cands);
+        if (!(top > f.y0)) continue;             // 줄이는 방향으로만 (안전 바닥)
+        if (top >= f.y1) continue;               // 상자가 뒤집히면 적용하지 않는다
+        f.peeledFrom_ = f.y0;   // 방출 record에 싣는다 (아래) — 새 record type 없이 이력을 남긴다
+        f.y0 = top;
+        dbg(`  Fig${f.num}: CLAMP top ${f.peeledFrom_} → ${f.y0}` +
+          ` (Δ${((f.y0 - f.peeledFrom_) / S).toFixed(1)}pt` +
+          ` src=${top === f.paraTop_ ? "para" : "peel"})`);
+      }
+      /* 단락 x 클램프 적용 (v2.26.0) — 상단 클램프 **뒤**, dedup 앞. 축소 전용.
+       * ★ 여기서 판정하는 이유는 세 가지가 전부 여기서만 참이기 때문이다(적대 리뷰):
+       *   ⓐ 우주가 **실제 방출 상자**다 — scan의 밴드로 자르면 좌우 잉크 확장이 정당하게 넓힌
+       *     부분을 도로 자른다(Pylkkänen `1@2` 우 14.6pt 손실).
+       *   ⓑ 상단이 **최종값**(`max(peelTop, paraTop)`)이다 — peel이 전수 273 대 19로 지배적이라
+       *     scan에서 `paraTop`만 보고 재면 이미 없어진 블록의 단락으로 자르게 된다.
+       *   ⓒ 컬럼 재분할 scan의 죽은 잉크 판독이 사라진다.
+       * ★ 조각 선택은 잉크 **질량**(비율 × 폭)이다 — 비율만 보면 좁고 진한 컬러바가 넓은
+       *   산점도를 이겨 상자가 띠로 붕괴한다. 축소 상한도 둔다(peel의 "한 블록만" 대응물).
+       * dedup 순위 입력(높이·래스터 플래그)은 x와 무관하므로 같은 num 경합의 승자도 불변이다. */
+      for (const f of figs) {
+        if (!f.paraBlockers_ || !pageTextMask) continue;
+        const y0 = f.y0, y1 = f.y1, boxH = Math.max(1, y1 - y0);
+        const inY = f.paraBlockers_.filter(p => {
+          const o = Math.min(p.y1 * S, y1) - Math.max(p.y0 * S, y0);
+          return o >= PARA_X_YFRAC * (p.y1 - p.y0) * S;
+        });
+        if (!inY.length) continue;
+        /* ★ 세로 커버리지 하한 — 한 단락이 상자 높이의 10%만 차지해도 자기 x구간을 **상자 전
+         * 높이에 걸쳐** 지우던 구멍을 막는다(적대 리뷰 #4). y쪽에는 대칭 가드(`PARA_BLOCK_COV`)가
+         * 있고 peel에는 "한 블록만"이 있는데 x에만 없었다. 판정은 **x가 겹치는 단락 묶음의
+         * 세로 합집합**으로 한다 — 한 컬럼을 여러 단락이 나눠 채우는 것이 정상이기 때문이다. */
+        const groups = [];
+        for (const p of inY.slice().sort((a, b) => a.x0 - b.x0)) {
+          const g = groups[groups.length - 1];
+          if (g && Math.min(g.x1, p.x1) - Math.max(g.x0, p.x0) > 0) {
+            g.x0 = Math.min(g.x0, p.x0); g.x1 = Math.max(g.x1, p.x1); g.ps.push(p);
+          } else groups.push({ x0: p.x0, x1: p.x1, ps: [p] });
+        }
+        const cutters = [];
+        for (const g of groups) {
+          const iv = g.ps.map(p => [Math.max(p.y0 * S, y0), Math.min(p.y1 * S, y1)])
+            .sort((a, b) => a[0] - b[0]);
+          let cov = 0, cur = null;
+          for (const [a, b] of iv) {
+            if (!cur || a > cur[1]) { if (cur) cov += cur[1] - cur[0]; cur = [a, b]; }
+            else cur[1] = Math.max(cur[1], b);
+          }
+          if (cur) cov += cur[1] - cur[0];
+          if (cov >= PARA_X_MIN_YCOV * boxH) cutters.push(g);
+        }
+        if (!cutters.length) continue;
+        let segs = [[f.x0, f.x1]];
+        for (const g of cutters) {
+          const px0 = g.x0 * S, px1 = g.x1 * S, keep = PARA_X_MIN_KEEP * S;
+          const next = [];
+          for (const [a, b] of segs) {
+            if (px1 <= a || px0 >= b) { next.push([a, b]); continue; }
+            if (px0 - a >= keep) next.push([a, px0]);
+            if (b - px1 >= keep) next.push([px1, b]);
+          }
+          segs = next;
+        }
+        if (!segs.length) continue;                                   // 전부 소진 → 기권
+        /* 잉크가 하나도 없으면 근거가 없는 것이므로 기권한다 — 종전 `-1` 초기값은 모든 조각이
+         * 질량 0으로 동률일 때 **최좌측을 근거 없이** 채택했다(적대 리뷰 #7). */
+        let best = null, bestMass = 0;
+        for (const [a, b] of segs) {
+          const mass = graphicInkRatio(grid, pageTextMask, { x0: a, y0, x1: b, y1 }) * (b - a);
+          if (mass > bestMass) { bestMass = mass; best = [a, b]; }
+        }
+        if (!best) continue;
+        /* ★ **정수 픽셀로 반올림한다(축소 방향)**. 소수 좌표는 방출 상자를 넘어 크롭까지 간다 —
+         * `c2.width = cw`가 소수를 잘라내고 `drawImage`의 소수 `sx`가 크롭 전체를 이중선형
+         * 보간시킨다(적대 리뷰 #1: PNG 폭 실측으로 확인). 엔진의 다른 x 생산자는 전부 반올림하고
+         * 있어 v2.26.0 이전 `f.x0`/`f.x1`은 항상 정수였다. */
+        const nx0 = Math.ceil(best[0]), nx1 = Math.floor(best[1]);
+        if (nx0 - f.x0 < PARA_X_MIN_DELTA && f.x1 - nx1 < PARA_X_MIN_DELTA) continue;
+        if (!(nx1 - nx0 >= PARA_X_MIN_KEEP * S)) continue;             // 상자가 무너지면 미적용
+        if ((nx1 - nx0) < PARA_X_MIN_KEEP_FRAC * (f.x1 - f.x0)) continue;
+        f.clampedFromX_ = [f.x0, f.x1];
+        dbg(`  Fig${f.num}: CLAMP x [${f.x0.toFixed(0)},${f.x1.toFixed(0)}] → ` +
+          `[${nx0},${nx1}] (Δ${(((f.x1 - f.x0) - (nx1 - nx0)) / S).toFixed(1)}pt` +
+          ` cutters=${cutters.length}/${inY.length} seg=${segs.length})`);
+        f.x0 = Math.max(f.x0, nx0); f.x1 = Math.min(f.x1, nx1);
+      }
+      pageTextMask = null;   // 마지막 소비자 — 크롭 생성 전에 W×H 마스크를 놓는다 (B7)
       const best = {};
       for (const f of figs) {
         const score = (f.raster_ ? 1e9 : 0) + f.h_;
@@ -3699,8 +4908,17 @@ async function extract(data, opts = {}) {
       }
       const emittedThisPage = diag ? [] : null;
       for (const { f } of Object.values(best)) {
-        const widthPx = f.x1 - f.x0, heightPx = f.y1 - f.y0;
-        if (widthPx < 30 || heightPx < 30) {
+        /* 최소 크기 바닥은 **클램프 전** 기하로 잰다 (v2.21.0 F2와 같은 이유, x는 v2.26.0):
+         * 방출 여부를 정하는 선택 결정이라 줄어든 상자로 재면 "상자만 줄인다"는 계약이 깨진다. */
+        const [fx0Pre, fx1Pre] = f.clampedFromX_ ?? [f.x0, f.x1];
+        const widthForFloor = fx1Pre - fx0Pre;          // 필터 입력 = 클램프 전 (v2.21.0 F2와 동형)
+        const widthPx = f.x1 - f.x0, heightPx = f.y1 - f.y0;   // record 값 = 방출 상자
+        /* ★ 최소 크기 바닥은 **벗기기 전** 높이로 판정한다 (v2.21.0 적대 리뷰 F2). 이 필터는
+         * 방출 여부를 정하는 선택 결정이라, 벗긴 높이로 재면 벗기기가 "상자만 줄인다"는 계약을
+         * 깨고 방출을 삭제할 수 있다. 현재 코퍼스에서는 벗긴 뒤 최소 높이가 142px로 바닥(30px)의
+         * 4.7배라 미발동이지만, 백로그 (3) 조건 확장이 바로 이 여유를 깎는 방향이다. */
+        const heightForFloor = f.y1 - (f.peeledFrom_ ?? f.y0);
+        if (widthForFloor < 30 || heightForFloor < 30) {
           const info = pd.captionData.infoByAnchor.get(f._anchor);
           if (info && info.adjacentState_ && info.adjacentState_.selectedFig === f) {
             info.adjacentState_.emission = "dropped";
@@ -3733,7 +4951,20 @@ async function extract(data, opts = {}) {
             page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
             decision: "emitted", widthPx, heightPx, outputBoxPx,
             outputBoxPt: diag.pxBoxToPt(outputBoxPx),
-            reasons: ["dedup-and-size-pass"],
+            /* x 클램프 이력 (v2.26.0) — peel의 peeledFromY0과 같은 취지: 새 record type
+             * 없이 이력을 남긴다. 없으면 최대 249.5pt의 상자 변화가 `--graph`에서 완전히
+             * 안 보이고, review.html 심층 모드·백로그 계측이 그 위에서 돌 수 없다. */
+            clampedFromX0: f.clampedFromX_ ? f.clampedFromX_[0] : null,
+            clampedFromX1: f.clampedFromX_ ? f.clampedFromX_[1] : null,
+            peeledFromY0: f.peeledFrom_ ?? null,   // 경계 벗기기 이력 (v2.21.0) — ⚠ 렌더 **px**
+            /* px 그대로인 위 필드를 기하적으로 쓰면 2.2배 엉뚱한 곳에 그려진다(v2.21.1 코드 리뷰:
+             * review.html이 최초로 그렇게 썼다). 같은 record의 상자들은 전부 pt로 변환돼 나가므로
+             * pt 판을 함께 싣는다 — 소비자가 S를 하드코딩하지 않아도 되게. px 필드는 기존 소비자
+             * (inspect-page-ink·analyze-block-trace)가 출력에 쓰고 있어 남긴다. */
+            peeledFromY0Pt: f.peeledFrom_ === undefined || f.peeledFrom_ === null
+              ? null : +(f.peeledFrom_ / S).toFixed(2),
+            reasons: f.peeledFrom_ !== undefined
+              ? ["dedup-and-size-pass", "outer-block-peeled"] : ["dedup-and-size-pass"],
           });
           diag.add("claim", {
             page: pd.num, num: f.num, candidateId: diag.figCandidateId(f),
@@ -3788,21 +5019,20 @@ async function extract(data, opts = {}) {
         selection: "none", chosenDirection: null, selectedFig: null,
         emission: "none", claim: "none",
       };
-      const state = diag ? diag.anchorState(anchorId) : {
-        chosenCandidateId: null,
-        chosenDirection: local.chosenDirection,
-        selection: local.selection,
-        emission: local.emission,
-        claim: local.claim,
-      };
+      /* lifecycle 상태는 **항상** 진단 무관 replica(`adjacentState_`)에서 읽는다 (v2.19.5).
+       * 이전 판은 `diag ? diag.anchorState(anchorId) : local`로 두 경로를 두었는데, 이 값 중
+       * `emission`은 12-B 게이트 입력이고 `claim`은 아래 eligibility 필터 입력이다 — 즉 public
+       * 결정이 진단 유무로 갈리는 경로가 하나 더 있었다(같은 계열 결함을 이 릴리스에서 함께 닫는다).
+       * 두 경로는 현재 lockstep이지만 한쪽만 갱신하는 수정이 언제든 조용한 분기를 만든다.
+       * `chosenCandidateId`만 진단 전용 식별자라 record 추적용으로 남긴다(anchorId와 동급). */
       const snapshot = {
         anchorId, num: info && info.num,
         captionPage: pd.num, candidatePage: pd.num - 1,
-        currentSelection: state.selection,
-        currentChosenCandidateId: state.chosenCandidateId,
-        currentChosenDirection: state.chosenDirection,
-        currentEmission: state.emission,
-        currentClaimState: state.claim,
+        currentSelection: local.selection,
+        currentChosenCandidateId: diag ? diag.anchorState(anchorId).chosenCandidateId : null,
+        currentChosenDirection: local.chosenDirection,
+        currentEmission: local.emission,
+        currentClaimState: local.claim,
       };
       adjacentCaptionBySnapshot.set(snapshot, {
         text: info && info.captionTextObserved_ || (cap && cap.s) || "",
@@ -3815,8 +5045,30 @@ async function extract(data, opts = {}) {
     anchorId: diag ? diag.registerAnchor(
       pageData[f.page - 1], f._anchor) : null,
     num: f.num, page: f.page,
-    outputBoxPx: { x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1 },
-    outputBoxPt: adjacentPxBoxToPt({ x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1 }),
+    /* ★ claim 기하는 **벗기기 전** 상자를 쓴다 (v2.21.0 적대 리뷰 F1). 이 상자는 출력 충실도가
+     * 아니라 **소유권 신호**다 — 12-B가 `adjacentIntersection(region, claim.outputBoxPx)`으로
+     * N−1 영역이 이미 임자가 있는지 판정하고, 그 결과가 `unclaimed`(7조건 AND 게이트의 1항)에
+     * 들어간다. 벗긴 상자를 넘기면 "머리글 띠만 겹치던 영역"이 갑자기 주인 없는 영역이 되어
+     * **게이트가 열리는 방향으로만** 틀린다(벗기기는 축소 전용이므로 교집합은 사라지기만 한다).
+     * 실측: 벗기기 후 `adjacent-region.rawClaimState`가 57건 `owned` → `no-owned`로 뒤집혔다.
+     * 이번 코퍼스에서 ADDED 0이 유지된 것은 그 57건이 선택된 합성에 안 들어갔기 때문이지
+     * 구조적 보장이 아니었다. 여기서 그 보장을 실제로 만든다. */
+    outputBoxPx: (() => {
+      /* ★ claim 기하는 **클램프 전** 상자다 (v2.21.0 F1과 같은 이유, x축 확장은 v2.26.0).
+       * 12-B가 `adjacentIntersection(region, claim.outputBoxPx)`로 N−1 영역의 임자를 판정하고
+       * 그 결과가 `unclaimed`(7조건 AND의 1항)에 들어가는데, 줄어든 상자를 넘기면 교집합이
+       * **사라지기만 하므로 게이트가 열리는 방향으로만** 틀린다. y는 v2.21.0이 이미 되돌리고
+       * 있었고 x가 v2.26.0에서 빠져 있었다 — 축소량이 최대 245pt라 노출이 더 크다. */
+      const y0 = f.peeledFrom_ ?? f.y0;
+      const [x0, x1] = f.clampedFromX_ ?? [f.x0, f.x1];
+      return { x0, y0, x1, y1: f.y1 };
+    })(),
+    /* pt 짝도 **클램프 전** 기하다 — px만 되돌리면 같은 record 안에서 x축만 어긋나고, 이 프로젝트는
+     * 소비자에게 pt 필드를 권하고 있어(v2.21.1 리뷰) 그쪽을 읽는 순간 F1이 되살아난다. */
+    outputBoxPt: adjacentPxBoxToPt((() => {
+      const [x0, x1] = f.clampedFromX_ ?? [f.x0, f.x1];
+      return { x0, y0: f.peeledFrom_ ?? f.y0, x1, y1: f.y1 };
+    })()),
   }));
   /* 12-B resolver는 정규화 **전에** 돌려야 신규 방출 figure가 같은 필드 정규화와 suspectedMissing
    * 재계산을 그대로 통과한다. 방출이 0건이면 이전 버전과 완전히 동일한 경로다. */
@@ -3843,6 +5095,11 @@ async function extract(data, opts = {}) {
     delete f.captionBox;
     delete f.raster_;
     delete f.dir_;
+    delete f.peelTop_;      // 경계 벗기기 내부 필드 — 출력 미포함 (v2.21.0)
+    delete f.paraTop_;      // 단락 클램프 내부 필드 — 출력 미포함 (v2.25.0)
+    delete f.paraBlockers_; // x 클램프 재료 — 출력 미포함 (v2.26.0)
+    delete f.clampedFromX_;
+    delete f.peeledFrom_;
     delete f._anchor;   // soft floor 판정용 내부 태그 — 출력 미포함 (v2.14.0)
     f.confidence = 1.0; // 당분간 고정 (Margin FigureEntry.confidence 대응)
   }

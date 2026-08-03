@@ -227,7 +227,7 @@ const entries = seeds.map((seed) =>
 
 1. 엔진 전용 별도 repo에서 새 버전 검증 완료 후 (엔진 repo `docs/DEV.md` §버전 릴리스 절차)
 2. **복사 전에 엔진 repo가 clean한지 확인** — `git -C <엔진repo> status --porcelain`이 비어 있어야 하고,
-   `git -C <엔진repo> rev-parse --short HEAD`로 **7자리 SHA**를 적어 둔다.
+   `git -C <엔진repo> rev-parse --short=7 HEAD`로 **7자리 SHA**를 적어 둔다.
    더티한 작업 트리를 복사하면 **어느 커밋에도 존재하지 않는 엔진이 벤더링되는데 두 파일 diff는
    0건이라 아무 검사에도 안 걸린다** — 나중에 그 코드를 되짚을 방법이 없어진다.
 3. `fig-extract.js`를 `src/core/`에 **그대로 복사** — v2.3.0부터 엔진 파일에 globalThis 노출이 포함되어

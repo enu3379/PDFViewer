@@ -22,7 +22,7 @@ if (!globalScope.pdfjsLib) globalScope.pdfjsLib = pdfjs;
  * (아래 ⚠). 타입 ↔ 엔진 정합은 `docs/fig-extract-integration.md` §갱신 절차가 지키는 사람의 몫이고,
  * 핀은 "그 절차를 다시 읽어라"는 알람일 뿐이다.
  */
-export const VENDORED_ENGINE_VERSION = '2.26.1';
+export const VENDORED_ENGINE_VERSION = '2.26.2';
 
 /** pt 단위, 좌상단 원점 사각형 (엔진 좌표계) */
 export interface EngineBox {
@@ -104,6 +104,22 @@ export interface ExtractOptions {
    * 부르면 **throw**한다. 프리뷰 카드를 그리는 뷰어 경로에서는 쓰지 말 것.
    */
   cropImages?: boolean;
+  /**
+   * v2.26.2+ `[필드 추가]`: 스캔이 끝난 페이지의 pdf.js 캐시(디코드된 이미지)를
+   * `page.cleanup()`으로 반환할지. **출력에는 영향이 없다** — 비우는 것은 캐시뿐이고 이후 다시
+   * 필요하면 pdf.js가 재파싱한다.
+   *
+   * 엔진이 직접 연 문서(`pdfDocument` 미지정)는 이 값과 무관하게 항상 해제한다. 이 옵션은
+   * **`pdfDocument`로 넘긴 문서에만** 적용되고 기본값은 `false`다 — Margin이 넘기는 것은
+   * 사용자가 지금 보고 있는 뷰어의 살아 있는 문서라, 엔진이 캐시를 비우면 뷰어의 다음 렌더가
+   * 재파싱을 물고, 뷰어가 그 페이지를 렌더하는 중이면 pdf.js가 지연 정리를 걸어 5초 뒤에 지운다.
+   *
+   * 켜면 스캔 중 메모리 피크가 내려간다 — 엔진 repo 실측(330편 배치)에서 렌더러 private 피크가
+   * 5,407 → 4,707MB, `FigRenderError` 발생이 7건 → 1건이었다. **`FigRenderError`(#12 → B7)를
+   * 자주 만나는 환경이라면 이 옵션이 그 압력을 낮추는 손잡이다.** 대가는 뷰어 렌더 캐시가
+   * 비워지는 것뿐이므로, 스캔 후 사용자가 그 페이지를 다시 볼 때 한 번 더 파싱한다.
+   */
+  releasePages?: boolean;
 }
 
 export interface FigExtractApi {

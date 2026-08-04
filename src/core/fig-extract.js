@@ -41,7 +41,27 @@
 
 const FigExtract = (() => {
 
-const VERSION = "2.26.1";
+const VERSION = "2.26.2";
+// 2.26.2: [필드 추가: optional opts.releasePages] **페이지 캐시 해제**. 엔진은 pdf.js
+//        `page.cleanup()`을 한 번도 부르지 않아, 스캔한 페이지의 디코드된 이미지가 **문서를 다
+//        훑을 때까지 전부 함께 상주**했다 (40MB PDF 한 편이 렌더러 2.4GB, 130MB가 3.9GB —
+//        배치 OOM과 B7 압력의 직접 원인). 두 곳에서 해제한다:
+//        ① `getImageBoxes`(=`getOperatorList`) 직후·렌더 직전 — pdf.js는 oplist와 display에
+//           **다른 캐시 키**를 쓰고 objId 카운터를 리셋하지 않으므로 캡션 페이지는 두 번 파싱되고
+//           **디코드 사본 두 벌이 동시에 상주**한다. 렌더 전에 oplist 벌을 놓아주면 페이지 내부
+//           피크가 대략 절반이 된다. 재파싱 비용은 없다 — 어차피 캐시 키가 달라 다시 파싱한다.
+//        ② 페이지를 다 쓴 시점(크롭까지 끝나고 캔버스를 반환하는 자리) — 페이지 간 누적을 끊는다.
+//        감지 결과는 불변이다: 해제되는 것은 캐시뿐이고 objId는 출력에 들어가지 않으며 이미지
+//        디코드는 결정적이다. **다만 전수 diff가 0이라는 뜻은 아니다** — 이 변경은 메모리 압력을
+//        바꾸고 그 압력이 B7(`FigRenderError`)의 유일한 입력이라, 이전에 압력으로 죽던 논문이
+//        완주하면 ADDED로 나타난다. 그 방향의 차이는 회귀가 아니다.
+//        ★ **호스트가 `opts.pdfDocument`로 넘긴 문서에는 기본 적용하지 않는다** — 그 문서는
+//        사용자가 지금 보고 있는 뷰어의 살아 있는 문서라(Margin `tab-figures.ts`), 엔진이 캐시를
+//        비우면 뷰어의 다음 렌더가 재파싱을 물고, 뷰어가 그 페이지를 **렌더 중이면** pdf.js가
+//        `#pendingCleanup`을 걸어 5초 뒤에 지운다. 호스트가 메모리를 우선하려면 `opts.releasePages:
+//        true`로 켠다 — Margin의 B7 압력을 낮추는 손잡이가 이것이다. 엔진이 직접 연 문서
+//        (배치 러너·frontend)는 항상 해제하고, 문서를 다 쓴 뒤 `pdf.cleanup()`으로 워커 쪽
+//        공용 캐시(`commonObjs`·폰트)까지 반환한다.
 // 2.26.1: [계약 무변경] x 클램프의 `PARA_X_MIN_DELTA`를 12 → 2px. v2.26.0이 막았던 "방출
 //        여백(10px ≈ 4.55pt)만 깎는 발화" 54행 중 **51행이 `body_text_sliver` 보유**였다 —
 //        여백이 옆 컬럼 본문과 겹쳐 글자 조각이 들어와 있었고 4.6pt를 깎으면 그게 빠진다.
@@ -4190,6 +4210,10 @@ async function observeAdjacentPages(pageData, dom, diag, opts, checkAborted, sna
       imageBoxes = await getImageBoxes(pd.page, pd.h, error => { operatorError = error; });
       checkAborted();
       if (operatorError) throw operatorError;
+      /* same-page 루프와 같은 이유로 렌더 전에 oplist 벌을 놓아준다 — 여기는 특히 중요하다.
+       * 12-B는 이미 해제된 페이지를 **다시** 파싱하므로 그 전량이 새로 생긴 참이고, 바로 아래가
+       * FigRenderError를 던지는 자리(압력에 가장 민감한 지점)다. */
+      releasePageCache(pd, pageReleaseEnabled(opts));
       if (opts.renderPage) {
         checkAborted();
         canvas = await opts.renderPage(targetPage, S);
@@ -4212,6 +4236,9 @@ async function observeAdjacentPages(pageData, dom, diag, opts, checkAborted, sna
       grid = makeInk(canvas, !opts.renderPage);   // 카나리아는 엔진 소유 캔버스에서만 (B7)
     } catch (error) {
       releaseOwnedCanvas();
+      /* 이 catch는 `continue`로 빠져나가 아래 finally를 타지 않는다 — 여기서 안 놓아주면
+       * 방금 getImageBoxes가 만든 디코드 결과가 12-B 나머지와 호출자 수명 내내 남는다. */
+      releasePageCache(pd, pageReleaseEnabled(opts));
       if (opts.signal && opts.signal.aborted)
         throw new DOMException("figure 추출이 취소됨", "AbortError");
       /* 죽은 캔버스는 "이 PDF가 특이하다"가 아니라 실행 환경 실패다 (B7). unobservable로 삼키면
@@ -4574,10 +4601,26 @@ async function observeAdjacentPages(pageData, dom, diag, opts, checkAborted, sna
       }
     } finally {
       releaseOwnedCanvas();
+      /* same-page 루프와 같은 처리 — 12-B는 N−1 페이지를 **다시** 파싱·렌더하므로 여기서
+       * 안 놓아주면 방금 재생성한 디코드 캐시가 문서 끝까지 그대로 남는다. */
+      releasePageCache(pd, pageReleaseEnabled(opts));
     }
   }
   return resolved;
 }
+
+/* pdf.js 페이지 캐시 해제 (v2.27.0). `page.cleanup()`은 **동기**라 여기서 await가 생기지 않는다 —
+ * 페이지 본문의 "makeInk 이후 크롭까지 await 없음" 보장(B7 크롭 카나리아의 근거)을 깨지 않는다.
+ * 렌더가 진행 중이면 pdf.js가 아무것도 하지 않고 false를 돌려주므로 반드시 렌더·크롭이 끝난 뒤에
+ * 부른다. 실패는 삼킨다 — 캐시 해제는 최적화지 정확성 요건이 아니고, 여기서 던지면 정상 추출이
+ * 메모리 최적화 때문에 실패하는 뒤바뀐 상황이 된다. */
+function releasePageCache(pd, enabled) {
+  if (!enabled || !pd || !pd.page || typeof pd.page.cleanup !== "function") return;
+  try { pd.page.cleanup(); } catch (e) { /* 무해 */ }
+}
+/* 해제해도 되는 문서인가 — 판정을 한 곳에 둔다(두 경로가 갈리면 한쪽만 고치는 수정이 조용한
+ * 분기를 만든다). 호스트가 넘긴 문서는 옵트인, 엔진이 직접 연 문서는 항상 해제. */
+const pageReleaseEnabled = opts => (opts.pdfDocument ? opts.releasePages === true : true);
 
 /* ===================== 메인 파이프라인 ===================== */
 async function extract(data, opts = {}) {
@@ -4598,6 +4641,11 @@ async function extract(data, opts = {}) {
 
   const pdf = opts.pdfDocument || await pdfjsLib.getDocument({ data }).promise;
   checkAborted();
+  /* 페이지 리소스 해제 (v2.27.0). pdf.js는 파싱·렌더가 디코드한 이미지를 페이지별 `page.objs`에
+   * 캐시하고, 그걸 비우는 유일한 수단이 `page.cleanup()`이다. 안 부르면 문서를 다 훑을 때까지
+   * 전 페이지의 디코드 결과가 함께 상주한다 — 한 편 안에서의 메모리 피크가 바로 이것이다.
+   * 호스트 문서에 기본 적용하지 않는 이유는 헤더 체인지로그 참고(뷰어의 살아 있는 캐시다). */
+  const releasePages = pageReleaseEnabled(opts);
   let title = null;
   try {
     const meta = await pdf.getMetadata();
@@ -4636,9 +4684,16 @@ async function extract(data, opts = {}) {
   const allFigs = [];
   for (const pd of pageData) {
     checkAborted();
+    /* 캡션 없는 페이지에는 해제할 것이 없다 — `getTextContent`는 스트림이라 intent state도
+     * `page.objs` 항목도 만들지 않는다. 여기서 cleanup을 불러 봐야 빈 맵을 비운다. */
     if (!pd.captionData.anchors.length) continue;
     onProgress(`figure 감지… p.${pd.num}`);
     pd.images = await getImageBoxes(pd.page, pd.h);
+    /* ★ 렌더 **전에** oplist 벌을 놓아준다. pdf.js는 oplist와 display에 다른 캐시 키를 쓰고
+     * objId 카운터를 리셋하지 않아, 아래 render가 같은 이미지를 새 objId로 다시 디코드해
+     * 두 벌이 동시에 상주한다. 여기서 끊으면 페이지 내부 피크가 대략 절반이 되고, 재파싱
+     * 비용은 늘지 않는다 — 캐시 키가 달라 어차피 다시 파싱하기 때문이다. */
+    releasePageCache(pd, releasePages);
     /* 페이지 렌더: 호스트(Margin 등)가 renderPage(pageNum, scale)를 주입하면 그걸 사용 */
     let canvas;
     if (opts.renderPage) {
@@ -5002,6 +5057,10 @@ async function extract(data, opts = {}) {
        * 크롭이 이미 PNG로 직렬화돼 더 볼 일이 없고, GC를 기다리는 사이 다음 페이지
        * 캔버스와 동시 상주하는 것을 없앤다. adjacent 경로의 releaseOwnedCanvas와 같은 처리. */
       releasePageCanvas();
+      /* 캔버스와 같은 자리에서 pdf.js 쪽 페이지 캐시(디코드된 이미지)도 반환한다 (v2.27.0).
+       * 캔버스만 놓아주고 이걸 두면 페이지마다 디코드 결과가 쌓여 문서 끝까지 상주한다 —
+       * 크롭까지 끝난 이 시점 이후로 이 페이지를 same-page 경로에서 다시 볼 일은 없다. */
+      releasePageCache(pd, releasePages);
     }
   }
   /* N−1 observer 입력은 same-page lifecycle이 모두 끝난 이 지점에서 scalar로 동결한다.
@@ -5121,6 +5180,11 @@ async function extract(data, opts = {}) {
     });
     diag.finish();
   }
+  /* 문서 단위 정리 — `page.cleanup()`이 닿지 못하는 워커 쪽 공용 캐시(`commonObjs`의 전역 캐시
+   * 이미지·폰트·CMap)를 반환한다. **엔진이 직접 연 문서에만** 한다: 호스트 문서에 걸면 뷰어가
+   * 쓰고 있는 폰트까지 날아가 다음 렌더가 전부 다시 준비해야 한다.
+   * 결과(figures·크롭 PNG)는 이미 문서와 무관한 값이라 여기서 정리해도 안전하다. */
+  if (!opts.pdfDocument) { try { await pdf.cleanup(); } catch (e) { /* 최적화라 실패 무해 */ } }
   return { title, numPages: pdf.numPages, figures, suspectedMissing, engineVersion: VERSION };
 }
 

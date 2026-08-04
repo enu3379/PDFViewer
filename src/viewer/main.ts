@@ -17,7 +17,7 @@ import type { Highlight, Memo, PenColor } from '../core/types';
 import { HighlightOverlay } from './overlay-highlights';
 import { FiguresTab } from './panel/tab-figures';
 import { MemoTab } from './panel/tab-memos';
-import { type FlatOutlineItem, PdfHost } from './pdf-host';
+import { type FlatOutlineItem, PdfHost, isLoadSuperseded } from './pdf-host';
 
 const PANEL_WIDTH_KEY = 'margin:panelWidth';
 const PANEL_MIN_WIDTH = 264;
@@ -147,7 +147,14 @@ let downloadName = 'document.pdf';
 async function downloadCurrentPdf(): Promise<void> {
   const doc = host.pdfDocument;
   if (!doc || downloadButton.disabled) return;
-  const data = await doc.getData();
+  /* 내려받는 도중 사용자가 다른 PDF를 열면 이 문서는 destroy된다 (#35) — getData가 거절하므로
+   * unhandled rejection이 되지 않게 삼킨다. 이미 사라진 문서라 재시도할 대상도 없다. */
+  let data: Awaited<ReturnType<typeof doc.getData>>;
+  try {
+    data = await doc.getData();
+  } catch {
+    return;
+  }
   // getData()의 Uint8Array<ArrayBufferLike>는 BlobPart와 타입이 안 맞아 ArrayBuffer 사본으로 감싼다.
   const blob = new Blob([new Uint8Array(data)], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
@@ -240,7 +247,6 @@ async function initializeDoc(titleFallback: string, url?: string): Promise<void>
   buildRenderedPageIndexes();
   syncAnnotationViews();
   repairRenderedPages();
-  figuresTab.setDocument(host.pdfDocument);
 }
 
 function markTocForPage(page: number): void {
@@ -256,6 +262,7 @@ function markTocForPage(page: number): void {
 
 async function loadUrl(file: string): Promise<void> {
   setLoading(file);
+  figuresTab.setDocument(null);
   if (fileLabel) fileLabel.textContent = basenameFromUrl(file);
   const isLocalFile = isFileSchemeUrl(file);
   if (isLocalFile && !(await canReadFileSchemeUrls())) {
@@ -263,7 +270,8 @@ async function loadUrl(file: string): Promise<void> {
     return;
   }
   try {
-    await host.loadUrl(file);
+    const doc = await host.loadUrl(file);
+    figuresTab.setDocument(doc);
     await initializeDoc(basenameFromUrl(file), file);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(basenameFromUrl(file));
@@ -273,6 +281,9 @@ async function loadUrl(file: string): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    /* 이 로드가 더 최신 로드로 밀려났다면 화면은 그쪽 것이다 — 건드리지 않고 물러난다 (#35) */
+    if (isLoadSuperseded(error)) return;
+    figuresTab.setDocument(null);
     if (isLocalFile && isMissingPdfError(error)) {
       showMissingFileState(file);
       return;
@@ -283,9 +294,11 @@ async function loadUrl(file: string): Promise<void> {
 
 async function loadSelectedFile(file: File): Promise<void> {
   setLoading(file.name);
+  figuresTab.setDocument(null);
   if (fileLabel) fileLabel.textContent = file.name;
   try {
-    await host.loadFile(file);
+    const doc = await host.loadFile(file);
+    figuresTab.setDocument(doc);
     await initializeDoc(file.name);
     if (fileLabel && docData) fileLabel.textContent = docData.meta.title;
     downloadName = pdfDownloadName(file.name);
@@ -295,6 +308,9 @@ async function loadSelectedFile(file: File): Promise<void> {
     setPageUi(host.currentPage, host.pageCount);
     renderToc(await host.getOutlineItems());
   } catch (error) {
+    /* 이 로드가 더 최신 로드로 밀려났다면 화면은 그쪽 것이다 — 건드리지 않고 물러난다 (#35) */
+    if (isLoadSuperseded(error)) return;
+    figuresTab.setDocument(null);
     setError(error);
   }
 }
@@ -881,9 +897,10 @@ tocList.addEventListener('click', (event) => {
   if (!row) return;
   const item = outlineItems.find((candidate) => candidate.id === row.dataset.id);
   if (!item) return;
+  /* 이동 중 문서가 교체되면 getDestination이 거절한다 (#35) — 조용히 흘린다 */
   void host.jumpToOutline(item).then(() => {
     if (!pinned) closePanel();
-  });
+  }).catch(() => {});
 });
 
 const file = readFileParam();

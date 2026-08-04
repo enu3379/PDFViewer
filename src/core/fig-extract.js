@@ -61,7 +61,10 @@ const VERSION = "2.26.2";
 //        `#pendingCleanup`을 걸어 5초 뒤에 지운다. 호스트가 메모리를 우선하려면 `opts.releasePages:
 //        true`로 켠다 — Margin의 B7 압력을 낮추는 손잡이가 이것이다. 엔진이 직접 연 문서
 //        (배치 러너·frontend)는 항상 해제하고, 문서를 다 쓴 뒤 `pdf.cleanup()`으로 워커 쪽
-//        공용 캐시(`commonObjs`·폰트)까지 반환한다.
+//        공용 캐시(`commonObjs`·폰트)까지 반환한다 — **성공·실패·취소 어느 경로로 빠져나가도**
+//        돈다. 실패 경로가 곧 메모리 압력 경로(`FigRenderError`)라, 거기서 건너뛰면 정리가 가장
+//        필요한 순간에만 안 도는 셈이기 때문이다. 그래서 문서 소유를 얇은 래퍼 `extract`로 두고
+//        본문은 `extractWithDocument`에 있다 (CodeRabbit 리뷰, PDFViewer#42).
 // 2.26.1: [계약 무변경] x 클램프의 `PARA_X_MIN_DELTA`를 12 → 2px. v2.26.0이 막았던 "방출
 //        여백(10px ≈ 4.55pt)만 깎는 발화" 54행 중 **51행이 `body_text_sliver` 보유**였다 —
 //        여백이 옆 컬럼 본문과 겹쳐 글자 조각이 들어와 있었고 4.6pt를 깎으면 그게 빠진다.
@@ -4623,7 +4626,28 @@ function releasePageCache(pd, enabled) {
 const pageReleaseEnabled = opts => (opts.pdfDocument ? opts.releasePages === true : true);
 
 /* ===================== 메인 파이프라인 ===================== */
+/* 문서 수명 소유자. 엔진이 직접 연 문서는 **성공·실패·취소 어느 경로로 빠져나가도**
+ * 정리한다 — 초안은 성공 반환 직전에만 정리해서, 예외나 AbortError로 빠지면 `commonObjs`
+ * 전역 캐시가 그대로 남았다. 하필 **실패 경로가 곧 메모리 압력 경로**다(FigRenderError는 정의상
+ * 메모리가 모자랄 때 난다) — 가장 필요한 순간에만 안 도는 셈이라 방향이 거꾸로였다.
+ * 호스트가 `opts.pdfDocument`로 넘긴 문서는 우리 것이 아니므로 손대지 않는다(수명은 호스트 몫).
+ * 본문을 통째로 try로 감싸는 대신 소유 계층을 분리한 이유: 500줄을 들여쓰기만 바꿔 diff를
+ * 못 읽게 만드는 것보다, "누가 문서를 소유하는가"를 코드 구조로 드러내는 편이 낫다. */
 async function extract(data, opts = {}) {
+  if (opts.pdfDocument) return extractWithDocument(opts.pdfDocument, opts);
+  /* 문서를 열기 전 취소 확인 — 아래 core도 같은 검사를 하지만 그건 문서를 연 뒤다. */
+  if (opts.signal && opts.signal.aborted)
+    throw new DOMException("figure 추출이 취소됨", "AbortError");
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  try {
+    return await extractWithDocument(pdf, opts);
+  } finally {
+    /* 정리 실패가 원래 오류를 가리면 안 된다 — 삼킨다. */
+    try { await pdf.cleanup(); } catch (e) { /* 최적화라 실패 무해 */ }
+  }
+}
+
+async function extractWithDocument(pdf, opts) {
   const onProgress = opts.onProgress || (() => {});
   const dbg = opts.debug || (() => {});
   const diag = makeDiagnosticRecorder(opts.onDiagnostic);
@@ -4639,9 +4663,8 @@ async function extract(data, opts = {}) {
   };
   checkAborted();
 
-  const pdf = opts.pdfDocument || await pdfjsLib.getDocument({ data }).promise;
   checkAborted();
-  /* 페이지 리소스 해제 (v2.27.0). pdf.js는 파싱·렌더가 디코드한 이미지를 페이지별 `page.objs`에
+  /* 페이지 리소스 해제 (v2.26.2). pdf.js는 파싱·렌더가 디코드한 이미지를 페이지별 `page.objs`에
    * 캐시하고, 그걸 비우는 유일한 수단이 `page.cleanup()`이다. 안 부르면 문서를 다 훑을 때까지
    * 전 페이지의 디코드 결과가 함께 상주한다 — 한 편 안에서의 메모리 피크가 바로 이것이다.
    * 호스트 문서에 기본 적용하지 않는 이유는 헤더 체인지로그 참고(뷰어의 살아 있는 캐시다). */
@@ -5180,11 +5203,8 @@ async function extract(data, opts = {}) {
     });
     diag.finish();
   }
-  /* 문서 단위 정리 — `page.cleanup()`이 닿지 못하는 워커 쪽 공용 캐시(`commonObjs`의 전역 캐시
-   * 이미지·폰트·CMap)를 반환한다. **엔진이 직접 연 문서에만** 한다: 호스트 문서에 걸면 뷰어가
-   * 쓰고 있는 폰트까지 날아가 다음 렌더가 전부 다시 준비해야 한다.
-   * 결과(figures·크롭 PNG)는 이미 문서와 무관한 값이라 여기서 정리해도 안전하다. */
-  if (!opts.pdfDocument) { try { await pdf.cleanup(); } catch (e) { /* 최적화라 실패 무해 */ } }
+  /* 문서 단위 정리(`page.cleanup()`이 닿지 못하는 `commonObjs`·폰트·CMap 반환)는 여기가 아니라
+   * 소유자인 `extract`의 finally가 한다 — 실패·취소 경로에서도 돌아야 하기 때문이다. */
   return { title, numPages: pdf.numPages, figures, suspectedMissing, engineVersion: VERSION };
 }
 
